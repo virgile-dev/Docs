@@ -5,6 +5,7 @@ Unit tests for the Document model
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
+from django.utils import timezone
 
 import pytest
 
@@ -255,7 +256,7 @@ def test_models_documents_get_abilities_preset_role(django_assert_num_queries):
     }
 
 
-def test_models_documents_get_versions_slice(settings):
+def test_models_documents_get_versions_slice_pagination(settings):
     """
     The "get_versions_slice" method should allow navigating all versions of
     the document with pagination.
@@ -268,7 +269,7 @@ def test_models_documents_get_versions_slice(settings):
         document.content = f"bar{i:d}"
         document.save()
 
-    # Add a version not related to the first document
+    # Add a document version not related to the first document
     factories.DocumentFactory()
 
     # - Get default max versions
@@ -294,6 +295,30 @@ def test_models_documents_get_versions_slice(settings):
     assert response["is_truncated"] is True
     assert len(response["versions"]) == 2
     assert response["next_version_id_marker"] != ""
+
+
+def test_models_documents_get_versions_slice_min_datetime():
+    """
+    The "get_versions_slice" method should filter out versions anterior to
+    the from_datetime passed in argument.
+    """
+    document = factories.DocumentFactory()
+    from_dt = []
+    for i in range(6):
+        from_dt.append(timezone.now())
+        document.content = f"bar{i:d}"
+        document.save()
+
+    response = document.get_versions_slice(min_datetime=from_dt[2])
+
+    assert len(response["versions"]) == 4
+    for version in response["versions"]:
+        assert version["last_modified"] > from_dt[2]
+
+    response = document.get_versions_slice(min_datetime=from_dt[5])
+
+    assert len(response["versions"]) == 1
+    assert response["versions"][0]["last_modified"] > from_dt[5]
 
 
 def test_models_documents_version_duplicate():

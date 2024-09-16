@@ -9,6 +9,9 @@ and this project adheres to
 
 ## [Unreleased]
 
+## Fixed
+
+- ♻️ Fix getting list of document versions available for a user #258
 
 ## [1.4.0] - 2024-09-17
 

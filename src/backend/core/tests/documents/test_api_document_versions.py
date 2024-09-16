@@ -60,7 +60,7 @@ def test_api_document_versions_list_authenticated_unrelated(reach):
 
 
 @pytest.mark.parametrize("via", VIA)
-def test_api_document_versions_list_authenticated_related(via, mock_user_teams):
+def test_api_document_versions_list_authenticated_related_success(via, mock_user_teams):
     """
     Authenticated users should be able to list document versions for a document
     to which they are directly related, whatever their role in the document.
@@ -95,7 +95,6 @@ def test_api_document_versions_list_authenticated_related(via, mock_user_teams):
 
     assert response.status_code == 200
     content = response.json()
-    assert len(content["results"]) == 0
     assert content["count"] == 0
 
     # Add a new version to the document
@@ -108,8 +107,98 @@ def test_api_document_versions_list_authenticated_related(via, mock_user_teams):
 
     assert response.status_code == 200
     content = response.json()
-    assert len(content["results"]) == 1
     assert content["count"] == 1
+
+
+@pytest.mark.parametrize("via", VIA)
+def test_api_document_versions_list_authenticated_related_pagination(
+    via, mock_user_teams
+):
+    """
+    The list of versions should be paginated and exclude versions that were created prior to the
+    user gaining access to the document.
+    """
+    user = factories.UserFactory()
+
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory()
+    for i in range(3):
+        document.content = f"before {i:d}"
+        document.save()
+
+    if via == USER:
+        models.DocumentAccess.objects.create(
+            document=document,
+            user=user,
+            role=random.choice(models.RoleChoices.choices)[0],
+        )
+    elif via == TEAM:
+        mock_user_teams.return_value = ["lasuite", "unknown"]
+        models.DocumentAccess.objects.create(
+            document=document,
+            team="lasuite",
+            role=random.choice(models.RoleChoices.choices)[0],
+        )
+
+    for i in range(3):
+        document.content = f"after {i:d}"
+        document.save()
+
+    response = client.get(
+        f"/api/v1.0/documents/{document.id!s}/versions/",
+    )
+
+    content = response.json()
+    assert content["is_truncated"] is False
+    assert content["count"] == 3
+    assert content["next_version_id_marker"] == ""
+    all_version_ids = [version["version_id"] for version in content["versions"]]
+
+    # - set page size
+    response = client.get(
+        f"/api/v1.0/documents/{document.id!s}/versions/?page_size=2",
+    )
+
+    content = response.json()
+    assert content["count"] == 2
+    assert content["is_truncated"] is True
+    marker = content["next_version_id_marker"]
+    assert marker == all_version_ids[1]
+    assert [
+        version["version_id"] for version in content["versions"]
+    ] == all_version_ids[:2]
+
+    # - get page 2
+    response = client.get(
+        f"/api/v1.0/documents/{document.id!s}/versions/?page_size=2&version_id={marker:s}",
+    )
+
+    content = response.json()
+    assert content["count"] == 1
+    assert content["is_truncated"] is False
+    assert content["next_version_id_marker"] == ""
+    assert content["versions"][0]["version_id"] == all_version_ids[2]
+
+
+def test_api_document_versions_list_exceeds_max_page_size():
+    """Page size should not exceed the limit set on the serializer"""
+    user = factories.UserFactory()
+
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[user])
+    document.content = "version 2"
+    document.save()
+
+    response = client.get(f"/api/v1.0/documents/{document.id!s}/versions/?page_size=51")
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "page_size": ["Ensure this value is less than or equal to 50."]
+    }
 
 
 @pytest.mark.parametrize("reach", models.LinkReachChoices.values)
@@ -157,7 +246,7 @@ def test_api_document_versions_retrieve_authenticated_unrelated(reach):
 def test_api_document_versions_retrieve_authenticated_related(via, mock_user_teams):
     """
     A user who is related to a document should be allowed to retrieve the
-    associated document user accesses.
+    associated document versions.
     """
     user = factories.UserFactory()
 
