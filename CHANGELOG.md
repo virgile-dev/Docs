@@ -20,11 +20,11 @@ and this project adheres to
 - ♻️ Allow null titles on documents for easier creation #234
 - 🛂(backend) stop to list public doc to everyone #234
 - 🚚(frontend) change visibility in share modal #235
+- ♻️ Bootstrap frontend #257
 
 ## Fixed
 
 - 🐛 Fix forcing ID when creating a document via API endpoint #234
-- 🐛 Rebuild frontend dev container from makefile #248
 
 
 ## [1.3.0] - 2024-09-05

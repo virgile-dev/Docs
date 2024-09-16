@@ -31,14 +31,6 @@ The easiest way to start working on the project is to use GNU Make:
 $ make bootstrap FLUSH_ARGS='--no-input'
 ```
 
-Then you can access to the project in development mode by going to http://localhost:3000.
-You will be prompted to log in, the default credentials are:
-```bash
-username: impress
-password: impress
-```
----
-
 This command builds the `app` container, installs dependencies, performs
 database migrations and compile translations. It's a good idea to use this
 command each time you are pulling code from the project repository to avoid
@@ -46,10 +38,36 @@ dependency-releated or migration-releated issues.
 
 Your Docker services should now be up and running 🎉
 
+You can access to the project by going to http://localhost:3000.
+You will be prompted to log in, the default credentials are:
+```bash
+username: impress
+password: impress
+```
+---
+
 Note that if you need to run them afterwards, you can use the eponym Make rule:
 
 ```bash
-$ make run-frontend-dev
+$ make run-with-frontend
+```
+
+⚠️ For the frontend developper, it is often better to run the frontend in development mode locally. 
+To do so, stop the frontend container:
+
+```bash
+$ docker compose stop frontend-dev
+```
+And run the frontend locally in development mode with the following command:
+
+```bash
+$ make run-frontend-development
+```
+
+To start all the services, except the frontend container, you can use the following command:
+
+```bash
+$ make run
 ```
 
 ### Adding content

@@ -76,24 +76,40 @@ create-env-files: \
 .PHONY: create-env-files
 
 bootstrap: ## Prepare Docker images for the project
-bootstrap: \
-	data/media \
-	data/static \
-	create-env-files \
-	build \
-	run-frontend-dev \
-	migrate \
-	demo \
-	back-i18n-compile \
-	mails-install \
-	mails-build
+	@$(MAKE) data/media
+	@$(MAKE) data/static
+	@$(MAKE) create-env-files
+	@$(MAKE) build cache=--no-cache
+	@$(MAKE) run-with-frontend
+	@$(MAKE) migrate
+	@$(MAKE) demo
+	@$(MAKE) back-i18n-compile
+	@$(MAKE) mails-install
+	@$(MAKE) mails-build
 .PHONY: bootstrap
 
 # -- Docker/compose
-build: ## build the app-dev container
-	@$(COMPOSE) build app-dev --no-cache
-	@$(COMPOSE) build frontend-dev --no-cache
+build: cache ?=
+build: ## build the project containers
+	@$(MAKE) build-backend cache=$(cache)
+	@$(MAKE) build-yjs-provider cache=$(cache)
+	@$(MAKE) build-frontend cache=$(cache)
 .PHONY: build
+
+build-backend: cache ?=
+build-backend: ## build the app-dev container
+	@$(COMPOSE) build app-dev $(cache)
+.PHONY: build-backend
+
+build-yjs-provider: cache ?=
+build-yjs-provider: ## build the y-provider container
+	@$(COMPOSE) build y-provider $(cache)
+.PHONY: build-yjs-provider
+
+build-frontend: cache ?=
+build-frontend: ## build the frontend container
+	@$(COMPOSE) build frontend-dev $(cache)
+.PHONY: build-frontend
 
 down: ## stop and remove containers, networks, images, and volumes
 	@$(COMPOSE) down
@@ -109,6 +125,11 @@ run: ## start the wsgi (production) and development server
 	@echo "Wait for postgresql to be up..."
 	@$(WAIT_DB)
 .PHONY: run
+
+run-with-frontend: ## Start all the containers needed (backend to frontend)
+	@$(MAKE) run
+	@$(COMPOSE) up --force-recreate -d frontend-dev
+.PHONY: run-with-frontend
 
 status: ## an alias for "docker compose ps"
 	@$(COMPOSE) ps
@@ -286,10 +307,10 @@ help:
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(firstword $(MAKEFILE_LIST)) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "$(GREEN)%-30s$(RESET) %s\n", $$1, $$2}'
 .PHONY: help
 
-# Front 
-run-frontend-dev: ## Install and run the frontend dev  
-	@$(COMPOSE) up --force-recreate -d frontend-dev
-.PHONY: run-frontend-dev
+# Front
+run-frontend-development: ## Run the frontend in development mode
+	cd $(PATH_FRONT_IMPRESS) && yarn dev
+.PHONY: run-frontend-development
 
 frontend-i18n-extract: ## Extract the frontend translation inside a json to be used for crowdin
 	cd $(PATH_FRONT) && yarn i18n:extract
@@ -314,7 +335,7 @@ start-tilt: ## start the kubernetes cluster using kind
 	tilt up -f ./bin/Tiltfile
 .PHONY: build-k8s-cluster
 
-VERSION_TYPE ?= minor
+bump-packages-version: VERSION_TYPE ?= minor
 bump-packages-version: ## bump the version of the project - VERSION_TYPE can be "major", "minor", "patch"
 	cd ./src/mail && yarn version --no-git-tag-version --$(VERSION_TYPE)
 	cd ./src/frontend/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
