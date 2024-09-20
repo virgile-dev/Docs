@@ -9,6 +9,10 @@ and this project adheres to
 
 ## [Unreleased]
 
+## Added
+
+- ✨AI to doc editor #250
+
 ## Fixed
 
 - 🐛 (backend) gitlab oicd userinfo endpoint #232
