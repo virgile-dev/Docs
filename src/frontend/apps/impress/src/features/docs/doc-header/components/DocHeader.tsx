@@ -1,9 +1,11 @@
-import { Button } from '@openfun/cunningham-react';
-import React, { Fragment, useState, useRef, useEffect } from 'react';
+import {
+  Button,
+  VariantType,
+  useToastProvider,
+} from '@openfun/cunningham-react';
+import React, { Fragment, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useUpdateDoc } from '../../doc-management/api/useUpdateDoc';
-import { KEY_DOC, KEY_LIST_DOC } from '../../doc-management/api';
-import { useToastProvider, VariantType } from '@openfun/cunningham-react';
+import styled from 'styled-components';
 
 import { Box, Card, StyledLink, Text } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
@@ -16,10 +18,11 @@ import {
 import { ModalVersion, Versions } from '@/features/docs/doc-versioning';
 import { useDate } from '@/hook';
 
+import { KEY_DOC, KEY_LIST_DOC } from '../../doc-management/api';
+import { useUpdateDoc } from '../../doc-management/api/useUpdateDoc';
+
 import { DocTagPublic } from './DocTagPublic';
 import { DocToolBox } from './DocToolBox';
-
-import styled from 'styled-components';
 
 const EditableText = styled.div<{ $isEditing: boolean }>`
   font-size: 1.5em;
@@ -96,8 +99,11 @@ export const DocHeader = ({ doc, versionId }: DocHeaderProps) => {
 
       // Set the range to where the user clicked
       if (selection && selection.rangeCount > 0) {
-        range.setStart(selection.anchorNode!, selection.anchorOffset);
-        range.setEnd(selection.anchorNode!, selection.anchorOffset);
+        const anchorNode = selection.anchorNode;
+        if (anchorNode) {
+          range.setStart(anchorNode, selection.anchorOffset);
+          range.setEnd(anchorNode, selection.anchorOffset);
+        }
       } else {
         // If no selection, default to end of text
         range.selectNodeContents(editableRef.current);
@@ -146,7 +152,7 @@ export const DocHeader = ({ doc, versionId }: DocHeaderProps) => {
               onKeyDown={handleKeyDown}
               onClick={() => !isEditing && setIsEditing(true)}
               suppressContentEditableWarning={true}
-              title={isEditing ? '' : t('Edit')} // Add this line
+              title={isEditing ? '' : t('Edit')}
             >
               {doc.title}
             </EditableText>

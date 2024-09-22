@@ -1,7 +1,7 @@
 import { Button } from '@openfun/cunningham-react';
+import { useRouter } from 'next/navigation';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { useRouter } from 'next/navigation';
 
 import { Box, Card } from '@/components';
 import { useCreateDoc } from '@/features/docs/doc-management/';
