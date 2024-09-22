@@ -7,7 +7,6 @@ import {
   useToastProvider,
 } from '@openfun/cunningham-react';
 import { UseMutationResult } from '@tanstack/react-query';
-import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -16,42 +15,11 @@ import { Box, Text } from '@/components';
 import useCunninghamTheme from '@/cunningham/useCunninghamTheme';
 
 import { KEY_DOC, KEY_LIST_DOC } from '../api';
-import { useCreateDoc } from '../api/useCreateDoc';
 import { useUpdateDoc } from '../api/useUpdateDoc';
 import IconEdit from '../assets/icon-edit.svg';
 import { Doc } from '../types';
 
 import { InputDocName } from './InputDocName';
-
-interface ModalCreateDocProps {
-  onClose: () => void;
-}
-
-export const ModalCreateDoc = ({ onClose }: ModalCreateDocProps) => {
-  const router = useRouter();
-  const api = useCreateDoc({
-    onSuccess: (doc) => {
-      router.push(`/docs/${doc.id}`);
-    },
-  });
-  const { t } = useTranslation();
-
-  return (
-    <ModalDoc
-      {...{
-        buttonText: t('Create the document'),
-        onClose,
-        isPublic: false,
-        titleModal: t('Create a new document'),
-        validate: (title) =>
-          api.mutate({
-            title,
-          }),
-        ...api,
-      }}
-    />
-  );
-};
 
 interface ModalUpdateDocProps {
   onClose: () => void;
