@@ -422,7 +422,7 @@ class Document(BaseModel):
                 {"KeyMarker": self.file_key, "VersionIdMarker": from_version_id}
             )
 
-        max_keys = (
+        real_page_size = (
             min(page_size, settings.DOCUMENT_VERSIONS_PAGE_SIZE)
             if page_size
             else settings.DOCUMENT_VERSIONS_PAGE_SIZE
@@ -431,7 +431,9 @@ class Document(BaseModel):
         response = default_storage.connection.meta.client.list_object_versions(
             Bucket=default_storage.bucket_name,
             Prefix=self.file_key,
-            MaxKeys=max_keys,
+            # compensate the latest version that we exclude below and get one more to
+            # know if there are more pages
+            MaxKeys=real_page_size + 2,
             **markers,
         )
 
@@ -448,19 +450,22 @@ class Document(BaseModel):
             }
             for version in response.get("Versions", [])
             if version["LastModified"] >= min_last_modified
+            and version["IsLatest"] is False
         ]
+        results = versions[:real_page_size]
 
-        count = len(versions)
-        is_truncated = response["IsTruncated"] and count == len(
-            response.get("Versions", [])
-        )
+        count = len(results)
+        if count == len(versions):
+            is_truncated = False
+            next_version_id_marker = ""
+        else:
+            is_truncated = True
+            next_version_id_marker = versions[count - 1]["version_id"]
 
         return {
-            "next_version_id_marker": response["NextVersionIdMarker"]
-            if is_truncated
-            else "",
+            "next_version_id_marker": next_version_id_marker,
             "is_truncated": is_truncated,
-            "versions": versions,
+            "versions": results,
             "count": count,
         }
 

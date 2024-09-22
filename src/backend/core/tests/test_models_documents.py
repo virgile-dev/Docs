@@ -287,7 +287,7 @@ def test_models_documents_get_versions_slice_pagination(settings):
         from_version_id=response["next_version_id_marker"]
     )
     assert response["is_truncated"] is False
-    assert len(response["versions"]) == 3
+    assert len(response["versions"]) == 2
     assert response["next_version_id_marker"] == ""
 
     # - Get custom max versions
@@ -300,7 +300,7 @@ def test_models_documents_get_versions_slice_pagination(settings):
 def test_models_documents_get_versions_slice_min_datetime():
     """
     The "get_versions_slice" method should filter out versions anterior to
-    the from_datetime passed in argument.
+    the from_datetime passed in argument and the current version.
     """
     document = factories.DocumentFactory()
     from_dt = []
@@ -311,14 +311,14 @@ def test_models_documents_get_versions_slice_min_datetime():
 
     response = document.get_versions_slice(min_datetime=from_dt[2])
 
-    assert len(response["versions"]) == 4
+    assert len(response["versions"]) == 3
     for version in response["versions"]:
         assert version["last_modified"] > from_dt[2]
 
-    response = document.get_versions_slice(min_datetime=from_dt[5])
+    response = document.get_versions_slice(min_datetime=from_dt[4])
 
     assert len(response["versions"]) == 1
-    assert response["versions"][0]["last_modified"] > from_dt[5]
+    assert response["versions"][0]["last_modified"] > from_dt[4]
 
 
 def test_models_documents_version_duplicate():
