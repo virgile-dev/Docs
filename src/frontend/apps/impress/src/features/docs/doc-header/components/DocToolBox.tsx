@@ -85,7 +85,7 @@ export const DocToolBox = ({ doc }: DocToolBoxProps) => {
             <Button
               onClick={() => {
                 setIsPanelVersionOpen(true);
-                setIsPanelSummaryOpen(false);
+                setIsPanelTableContentOpen(false);
                 setIsDropOpen(false);
               }}
               color="primary-text"
