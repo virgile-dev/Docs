@@ -3,22 +3,15 @@ import { useEffect } from 'react';
 
 import { User } from '@/core';
 
-const isCrispConfigured = (): boolean => {
-  return typeof window !== 'undefined' && !!window.$crisp;
-};
-
 export const initializeSupportSession = (user: User) => {
-  if (!isCrispConfigured()) {
-    return;
-  }
+  if (!Crisp.isCrispInjected()) return;
   Crisp.setTokenId(user.id);
   Crisp.user.setEmail(user.email);
 };
 
 export const terminateSupportSession = () => {
-  if (!isCrispConfigured()) {
-    return;
-  }
+  if (!Crisp.isCrispInjected()) return;
+  Crisp.setTokenId();
   Crisp.session.reset();
 };
 
@@ -33,9 +26,7 @@ export const useSupport = () => {
       console.warn('Crisp Website ID is not set');
       return;
     }
-    if (isCrispConfigured()) {
-      return;
-    }
+    if (Crisp.isCrispInjected()) return;
     Crisp.configure(CRISP_WEBSITE_ID);
   }, []);
 
