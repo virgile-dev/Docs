@@ -101,9 +101,11 @@ export const VersionList = ({ doc }: VersionListProps) => {
   });
   const containerRef = useRef<HTMLDivElement>(null);
   const versions = useMemo(() => {
-    return data?.pages.reduce((acc, page) => {
-      return acc.concat(page.results);
-    }, [] as Versions[]);
+    return data?.pages
+      .reduce((acc, page) => {
+        return acc.concat(page.versions);
+      }, [] as Versions[])
+      .filter((version) => !version.is_latest);
   }, [data?.pages]);
   const { setIsPanelVersionOpen } = useDocVersionStore();
 
