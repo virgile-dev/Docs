@@ -1,203 +1,148 @@
-import { DataGrid, SortModel, usePagination } from '@openfun/cunningham-react';
-import React, { useEffect, useState } from 'react';
+import { Button } from '@openfun/cunningham-react';
 import { useTranslation } from 'react-i18next';
-import { createGlobalStyle } from 'styled-components';
+import { InView } from 'react-intersection-observer';
+import { css } from 'styled-components';
 
-import { Card, StyledLink, Text, TextErrors } from '@/components';
-import { useCunninghamTheme } from '@/cunningham';
+import { Box, Card, Text } from '@/components';
 import {
-  Doc,
-  DocsOrdering,
-  LinkReach,
-  currentDocRole,
-  isDocsOrdering,
-  useDocs,
-  useTransRole,
+  DocDefaultFilter,
+  useInfiniteDocs,
 } from '@/features/docs/doc-management';
-import { useDate } from '@/hook/';
+import { useResponsiveStore } from '@/stores';
 
-import { PAGE_SIZE } from '../conf';
+import { DocsGridItem } from './DocsGridItem';
+import { DocsGridLoader } from './DocsGridLoader';
 
-import { DocsGridActions } from './DocsGridActions';
-
-const DocsGridStyle = createGlobalStyle`
-  & .c__datagrid thead{
-    position: sticky;
-    top: 0;
-    background: #fff;
-    z-index: 1;
-  }
-  & .c__pagination__goto{
-    display:none; 
-  }
-`;
-
-type SortModelItem = {
-  field: string;
-  sort: 'asc' | 'desc' | null;
+type DocsGridProps = {
+  target?: DocDefaultFilter;
 };
-
-function formatSortModel(sortModel: SortModelItem): DocsOrdering | undefined {
-  const { field, sort } = sortModel;
-  const orderingField = sort === 'desc' ? `-${field}` : field;
-
-  if (isDocsOrdering(orderingField)) {
-    return orderingField;
-  }
-}
-
-export const DocsGrid = () => {
-  const { colorsTokens } = useCunninghamTheme();
-  const transRole = useTransRole();
+export const DocsGrid = ({
+  target = DocDefaultFilter.ALL_DOCS,
+}: DocsGridProps) => {
   const { t } = useTranslation();
-  const { formatDate } = useDate();
-  const pagination = usePagination({
-    pageSize: PAGE_SIZE,
+
+  const { isDesktop } = useResponsiveStore();
+
+  const {
+    data,
+    isFetching,
+    isRefetching,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+  } = useInfiniteDocs({
+    page: 1,
+    ...(target &&
+      target !== DocDefaultFilter.ALL_DOCS && {
+        is_creator_me: target === DocDefaultFilter.MY_DOCS,
+      }),
   });
-  const [sortModel, setSortModel] = useState<SortModel>([
-    {
-      field: 'updated_at',
-      sort: 'desc',
-    },
-  ]);
-  const { page, pageSize, setPagesCount } = pagination;
-  const [docs, setDocs] = useState<Doc[]>([]);
-
-  const ordering = sortModel.length ? formatSortModel(sortModel[0]) : undefined;
-
-  const { data, isLoading, error } = useDocs({
-    page,
-    ordering,
-  });
-
-  useEffect(() => {
-    if (isLoading) {
+  const loading = isFetching || isLoading;
+  const hasDocs = data?.pages.some((page) => page.results.length > 0);
+  const loadMore = (inView: boolean) => {
+    if (!inView || loading) {
       return;
     }
+    void fetchNextPage();
+  };
 
-    setDocs(data?.results || []);
-  }, [data?.results, t, isLoading]);
-
-  useEffect(() => {
-    setPagesCount(data?.count ? Math.ceil(data.count / pageSize) : 0);
-  }, [data?.count, pageSize, setPagesCount]);
+  const title =
+    target === DocDefaultFilter.MY_DOCS
+      ? t('My docs')
+      : target === DocDefaultFilter.SHARED_WITH_ME
+        ? t('Shared with me')
+        : t('All docs');
 
   return (
-    <Card
-      $padding={{ bottom: 'small', horizontal: 'big' }}
-      $margin={{ all: 'big', top: 'none' }}
-      $overflow="auto"
-      aria-label={t(`Datagrid of the documents page {{page}}`, { page })}
+    <Box
+      $position="relative"
+      $width="100%"
+      $maxWidth="960px"
+      $maxHeight="calc(100vh - 52px - 1rem)"
+      $align="center"
+      $css={css`
+        overflow-x: hidden;
+        overflow-y: auto;
+      `}
     >
-      <DocsGridStyle />
-      <Text
-        $weight="bold"
-        as="h2"
-        $theme="primary"
-        $margin={{ bottom: 'none' }}
+      <DocsGridLoader isLoading={isRefetching || loading} />
+      <Card
+        data-testid="docs-grid"
+        $height="100%"
+        $width="100%"
+        $css={css`
+          overflow-x: hidden;
+          overflow-y: auto;
+        `}
+        $padding={{
+          top: 'base',
+          horizontal: isDesktop ? 'md' : 'xs',
+          bottom: 'md',
+        }}
       >
-        {t('Documents')}
-      </Text>
+        <Text
+          as="h4"
+          $size="h4"
+          $variation="1000"
+          $margin={{ top: '0px', bottom: '10px' }}
+        >
+          {title}
+        </Text>
 
-      {error && <TextErrors causes={error.cause} />}
+        {!hasDocs && !loading && (
+          <Box $padding={{ vertical: 'sm' }} $align="center" $justify="center">
+            <Text $size="sm" $variation="600" $weight="700">
+              {t('No documents found')}
+            </Text>
+          </Box>
+        )}
+        {hasDocs && (
+          <Box $gap="6px">
+            <Box
+              $direction="row"
+              $padding={{ horizontal: 'xs' }}
+              $gap="20px"
+              data-testid="docs-grid-header"
+            >
+              <Box $flex={6} $padding="3xs">
+                <Text $size="xs" $variation="600" $weight="500">
+                  {t('Name')}
+                </Text>
+              </Box>
+              {isDesktop && (
+                <Box $flex={2} $padding="3xs">
+                  <Text $size="xs" $weight="500" $variation="600">
+                    {t('Updated at')}
+                  </Text>
+                </Box>
+              )}
 
-      <DataGrid
-        columns={[
-          {
-            headerName: '',
-            id: 'visibility',
-            size: 95,
-            renderCell: ({ row }) => {
-              return (
-                <StyledLink href={`/docs/${row.id}`}>
-                  {row.link_reach === LinkReach.PUBLIC && (
-                    <Text
-                      $weight="bold"
-                      $background={colorsTokens()['primary-600']}
-                      $color="white"
-                      $padding="xtiny"
-                      $radius="3px"
-                    >
-                      {t('Public')}
-                    </Text>
-                  )}
-                </StyledLink>
-              );
-            },
-          },
-          {
-            headerName: t('Document name'),
-            field: 'title',
-            renderCell: ({ row }) => {
-              return (
-                <StyledLink href={`/docs/${row.id}`}>
-                  <Text $weight="bold" $theme="primary">
-                    {row.title}
-                  </Text>
-                </StyledLink>
-              );
-            },
-          },
-          {
-            headerName: t('Created at'),
-            field: 'created_at',
-            renderCell: ({ row }) => {
-              return (
-                <StyledLink href={`/docs/${row.id}`}>
-                  <Text $weight="bold">{formatDate(row.created_at)}</Text>
-                </StyledLink>
-              );
-            },
-          },
-          {
-            headerName: t('Updated at'),
-            field: 'updated_at',
-            renderCell: ({ row }) => {
-              return (
-                <StyledLink href={`/docs/${row.id}`}>
-                  <Text $weight="bold">{formatDate(row.updated_at)}</Text>
-                </StyledLink>
-              );
-            },
-          },
-          {
-            headerName: t('Your role'),
-            id: 'your_role',
-            renderCell: ({ row }) => {
-              return (
-                <StyledLink href={`/docs/${row.id}`}>
-                  <Text $weight="bold">
-                    {transRole(currentDocRole(row.abilities))}
-                  </Text>
-                </StyledLink>
-              );
-            },
-          },
-          {
-            headerName: t('Members'),
-            id: 'users_number',
-            renderCell: ({ row }) => {
-              return (
-                <StyledLink href={`/docs/${row.id}`}>
-                  <Text $weight="bold">{row.accesses.length}</Text>
-                </StyledLink>
-              );
-            },
-          },
-          {
-            id: 'column-actions',
-            renderCell: ({ row }) => {
-              return <DocsGridActions doc={row} />;
-            },
-          },
-        ]}
-        rows={docs}
-        isLoading={isLoading}
-        pagination={pagination}
-        onSortModelChange={setSortModel}
-        sortModel={sortModel}
-        emptyPlaceholderLabel={t("You don't have any document yet.")}
-      />
-    </Card>
+              <Box $flex={1.15} $align="flex-end" $padding="3xs" />
+            </Box>
+
+            {/* Body */}
+            {data?.pages.map((currentPage) => {
+              return currentPage.results.map((doc) => (
+                <DocsGridItem doc={doc} key={doc.id} />
+              ));
+            })}
+          </Box>
+        )}
+
+        {hasNextPage && !loading && (
+          <InView
+            data-testid="infinite-scroll-trigger"
+            as="div"
+            onChange={loadMore}
+          >
+            {!isFetching && hasNextPage && (
+              <Button onClick={() => void fetchNextPage()} color="primary-text">
+                {t('More docs')}
+              </Button>
+            )}
+          </InView>
+        )}
+      </Card>
+    </Box>
   );
 };

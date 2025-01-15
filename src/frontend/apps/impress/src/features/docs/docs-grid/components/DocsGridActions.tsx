@@ -1,74 +1,76 @@
-import { Button } from '@openfun/cunningham-react';
-import React, { useState } from 'react';
+import { useModal } from '@openfun/cunningham-react';
 import { useTranslation } from 'react-i18next';
 
-import { Box, DropButton, IconOptions, Text } from '@/components';
+import { DropdownMenu, DropdownMenuOption, Icon } from '@/components';
 import {
   Doc,
+  KEY_LIST_DOC,
   ModalRemoveDoc,
-  ModalUpdateDoc,
+  useCreateFavoriteDoc,
+  useDeleteFavoriteDoc,
 } from '@/features/docs/doc-management';
 
 interface DocsGridActionsProps {
   doc: Doc;
+  openShareModal?: () => void;
 }
 
-export const DocsGridActions = ({ doc }: DocsGridActionsProps) => {
+export const DocsGridActions = ({
+  doc,
+  openShareModal,
+}: DocsGridActionsProps) => {
   const { t } = useTranslation();
-  const [isModalUpdateOpen, setIsModalUpdateOpen] = useState(false);
-  const [isModalRemoveOpen, setIsModalRemoveOpen] = useState(false);
-  const [isDropOpen, setIsDropOpen] = useState(false);
+  const deleteModal = useModal();
 
-  if (!doc.abilities.partial_update && !doc.abilities.destroy) {
-    return null;
-  }
+  const removeFavoriteDoc = useDeleteFavoriteDoc({
+    listInvalideQueries: [KEY_LIST_DOC],
+  });
+  const makeFavoriteDoc = useCreateFavoriteDoc({
+    listInvalideQueries: [KEY_LIST_DOC],
+  });
+
+  const options: DropdownMenuOption[] = [
+    {
+      label: doc.is_favorite ? t('Unpin') : t('Pin'),
+      icon: 'push_pin',
+      callback: () => {
+        if (doc.is_favorite) {
+          removeFavoriteDoc.mutate({ id: doc.id });
+        } else {
+          makeFavoriteDoc.mutate({ id: doc.id });
+        }
+      },
+      testId: `docs-grid-actions-${doc.is_favorite ? 'unpin' : 'pin'}-${doc.id}`,
+    },
+    {
+      label: t('Share'),
+      icon: 'group',
+      callback: () => openShareModal?.(),
+      testId: `docs-grid-actions-share-${doc.id}`,
+    },
+
+    {
+      label: t('Remove'),
+      icon: 'delete',
+      callback: () => deleteModal.open(),
+      disabled: !doc.abilities.destroy,
+      testId: `docs-grid-actions-remove-${doc.id}`,
+    },
+  ];
 
   return (
     <>
-      <DropButton
-        button={
-          <IconOptions
-            isOpen={isDropOpen}
-            aria-label={t('Open the document options')}
-          />
-        }
-        onOpenChange={(isOpen) => setIsDropOpen(isOpen)}
-        isOpen={isDropOpen}
-      >
-        <Box>
-          {doc.abilities.partial_update && (
-            <Button
-              onClick={() => {
-                setIsModalUpdateOpen(true);
-                setIsDropOpen(false);
-              }}
-              color="primary-text"
-              icon={<span className="material-icons">edit</span>}
-              size="small"
-            >
-              <Text $theme="primary">{t('Update document')}</Text>
-            </Button>
-          )}
-          {doc.abilities.destroy && (
-            <Button
-              onClick={() => {
-                setIsModalRemoveOpen(true);
-                setIsDropOpen(false);
-              }}
-              color="primary-text"
-              icon={<span className="material-icons">delete</span>}
-              size="small"
-            >
-              <Text $theme="primary">{t('Delete document')}</Text>
-            </Button>
-          )}
-        </Box>
-      </DropButton>
-      {isModalUpdateOpen && (
-        <ModalUpdateDoc onClose={() => setIsModalUpdateOpen(false)} doc={doc} />
-      )}
-      {isModalRemoveOpen && (
-        <ModalRemoveDoc onClose={() => setIsModalRemoveOpen(false)} doc={doc} />
+      <DropdownMenu options={options}>
+        <Icon
+          data-testid={`docs-grid-actions-button-${doc.id}`}
+          iconName="more_horiz"
+          $theme="primary"
+          $variation="600"
+        />
+      </DropdownMenu>
+
+      {deleteModal.isOpen && (
+        <ModalRemoveDoc onClose={deleteModal.onClose} doc={doc} />
       )}
     </>
   );

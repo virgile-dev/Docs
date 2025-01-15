@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { goToGridDoc } from './common';
+
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
@@ -43,6 +45,12 @@ test.describe('Footer', () => {
         'Unless otherwise stated, all content on this site is under licence',
       ),
     ).toBeVisible();
+  });
+
+  test('checks footer is not visible on doc editor', async ({ page }) => {
+    await expect(page.locator('footer')).toBeVisible();
+    await goToGridDoc(page);
+    await expect(page.locator('footer')).toBeHidden();
   });
 
   const legalPages = [

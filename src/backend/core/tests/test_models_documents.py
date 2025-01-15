@@ -2,9 +2,15 @@
 Unit tests for the Document model
 """
 
+import smtplib
+from logging import Logger
+from unittest import mock
+
 from django.contrib.auth.models import AnonymousUser
+from django.core import mail
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
+from django.utils import timezone
 
 import pytest
 
@@ -26,15 +32,22 @@ def test_models_documents_id_unique():
         factories.DocumentFactory(id=document.id)
 
 
+def test_models_documents_creator_required():
+    """No field should be required on the Document model."""
+    models.Document.objects.create()
+
+
 def test_models_documents_title_null():
     """The "title" field can be null."""
-    document = models.Document.objects.create(title=None)
+    document = models.Document.objects.create(
+        title=None, creator=factories.UserFactory()
+    )
     assert document.title is None
 
 
 def test_models_documents_title_empty():
     """The "title" field can be empty."""
-    document = models.Document.objects.create(title="")
+    document = models.Document.objects.create(title="", creator=factories.UserFactory())
     assert document.title == ""
 
 
@@ -77,10 +90,17 @@ def test_models_documents_get_abilities_forbidden(is_authenticated, reach, role)
     user = factories.UserFactory() if is_authenticated else AnonymousUser()
     abilities = document.get_abilities(user)
     assert abilities == {
+        "accesses_manage": False,
+        "accesses_view": False,
+        "ai_transform": False,
+        "ai_translate": False,
         "attachment_upload": False,
-        "link_configuration": False,
+        "collaboration_auth": False,
         "destroy": False,
-        "manage_accesses": False,
+        "favorite": False,
+        "invite_owner": False,
+        "media_auth": False,
+        "link_configuration": False,
         "partial_update": False,
         "retrieve": False,
         "update": False,
@@ -107,10 +127,17 @@ def test_models_documents_get_abilities_reader(is_authenticated, reach):
     user = factories.UserFactory() if is_authenticated else AnonymousUser()
     abilities = document.get_abilities(user)
     assert abilities == {
+        "accesses_manage": False,
+        "accesses_view": False,
+        "ai_transform": False,
+        "ai_translate": False,
         "attachment_upload": False,
+        "collaboration_auth": True,
         "destroy": False,
+        "favorite": is_authenticated,
+        "invite_owner": False,
         "link_configuration": False,
-        "manage_accesses": False,
+        "media_auth": True,
         "partial_update": False,
         "retrieve": True,
         "update": False,
@@ -137,10 +164,17 @@ def test_models_documents_get_abilities_editor(is_authenticated, reach):
     user = factories.UserFactory() if is_authenticated else AnonymousUser()
     abilities = document.get_abilities(user)
     assert abilities == {
+        "accesses_manage": False,
+        "accesses_view": False,
+        "ai_transform": True,
+        "ai_translate": True,
         "attachment_upload": True,
+        "collaboration_auth": True,
         "destroy": False,
+        "favorite": is_authenticated,
+        "invite_owner": False,
         "link_configuration": False,
-        "manage_accesses": False,
+        "media_auth": True,
         "partial_update": True,
         "retrieve": True,
         "update": True,
@@ -156,10 +190,17 @@ def test_models_documents_get_abilities_owner():
     access = factories.UserDocumentAccessFactory(role="owner", user=user)
     abilities = access.document.get_abilities(access.user)
     assert abilities == {
+        "accesses_manage": True,
+        "accesses_view": True,
+        "ai_transform": True,
+        "ai_translate": True,
         "attachment_upload": True,
+        "collaboration_auth": True,
         "destroy": True,
+        "favorite": True,
+        "invite_owner": True,
         "link_configuration": True,
-        "manage_accesses": True,
+        "media_auth": True,
         "partial_update": True,
         "retrieve": True,
         "update": True,
@@ -174,10 +215,17 @@ def test_models_documents_get_abilities_administrator():
     access = factories.UserDocumentAccessFactory(role="administrator")
     abilities = access.document.get_abilities(access.user)
     assert abilities == {
+        "accesses_manage": True,
+        "accesses_view": True,
+        "ai_transform": True,
+        "ai_translate": True,
         "attachment_upload": True,
+        "collaboration_auth": True,
         "destroy": False,
+        "favorite": True,
+        "invite_owner": False,
         "link_configuration": True,
-        "manage_accesses": True,
+        "media_auth": True,
         "partial_update": True,
         "retrieve": True,
         "update": True,
@@ -195,10 +243,17 @@ def test_models_documents_get_abilities_editor_user(django_assert_num_queries):
         abilities = access.document.get_abilities(access.user)
 
     assert abilities == {
+        "accesses_manage": False,
+        "accesses_view": True,
+        "ai_transform": True,
+        "ai_translate": True,
         "attachment_upload": True,
+        "collaboration_auth": True,
         "destroy": False,
+        "favorite": True,
+        "invite_owner": False,
         "link_configuration": False,
-        "manage_accesses": False,
+        "media_auth": True,
         "partial_update": True,
         "retrieve": True,
         "update": True,
@@ -218,10 +273,17 @@ def test_models_documents_get_abilities_reader_user(django_assert_num_queries):
         abilities = access.document.get_abilities(access.user)
 
     assert abilities == {
+        "accesses_manage": False,
+        "accesses_view": True,
+        "ai_transform": False,
+        "ai_translate": False,
         "attachment_upload": False,
+        "collaboration_auth": True,
         "destroy": False,
+        "favorite": True,
+        "invite_owner": False,
         "link_configuration": False,
-        "manage_accesses": False,
+        "media_auth": True,
         "partial_update": False,
         "retrieve": True,
         "update": False,
@@ -242,10 +304,17 @@ def test_models_documents_get_abilities_preset_role(django_assert_num_queries):
         abilities = access.document.get_abilities(access.user)
 
     assert abilities == {
+        "accesses_manage": False,
+        "accesses_view": True,
+        "ai_transform": False,
+        "ai_translate": False,
         "attachment_upload": False,
+        "collaboration_auth": True,
         "destroy": False,
+        "favorite": True,
+        "invite_owner": False,
         "link_configuration": False,
-        "manage_accesses": False,
+        "media_auth": True,
         "partial_update": False,
         "retrieve": True,
         "update": False,
@@ -255,7 +324,7 @@ def test_models_documents_get_abilities_preset_role(django_assert_num_queries):
     }
 
 
-def test_models_documents_get_versions_slice(settings):
+def test_models_documents_get_versions_slice_pagination(settings):
     """
     The "get_versions_slice" method should allow navigating all versions of
     the document with pagination.
@@ -268,7 +337,7 @@ def test_models_documents_get_versions_slice(settings):
         document.content = f"bar{i:d}"
         document.save()
 
-    # Add a version not related to the first document
+    # Add a document version not related to the first document
     factories.DocumentFactory()
 
     # - Get default max versions
@@ -286,7 +355,7 @@ def test_models_documents_get_versions_slice(settings):
         from_version_id=response["next_version_id_marker"]
     )
     assert response["is_truncated"] is False
-    assert len(response["versions"]) == 3
+    assert len(response["versions"]) == 2
     assert response["next_version_id_marker"] == ""
 
     # - Get custom max versions
@@ -294,6 +363,30 @@ def test_models_documents_get_versions_slice(settings):
     assert response["is_truncated"] is True
     assert len(response["versions"]) == 2
     assert response["next_version_id_marker"] != ""
+
+
+def test_models_documents_get_versions_slice_min_datetime():
+    """
+    The "get_versions_slice" method should filter out versions anterior to
+    the from_datetime passed in argument and the current version.
+    """
+    document = factories.DocumentFactory()
+    from_dt = []
+    for i in range(6):
+        from_dt.append(timezone.now())
+        document.content = f"bar{i:d}"
+        document.save()
+
+    response = document.get_versions_slice(min_datetime=from_dt[2])
+
+    assert len(response["versions"]) == 3
+    for version in response["versions"]:
+        assert version["last_modified"] > from_dt[2]
+
+    response = document.get_versions_slice(min_datetime=from_dt[4])
+
+    assert len(response["versions"]) == 1
+    assert response["versions"][0]["last_modified"] > from_dt[4]
 
 
 def test_models_documents_version_duplicate():
@@ -322,3 +415,105 @@ def test_models_documents_version_duplicate():
         Bucket=default_storage.bucket_name, Prefix=file_key
     )
     assert len(response["Versions"]) == 2
+
+
+def test_models_documents__email_invitation__success():
+    """
+    The email invitation is sent successfully.
+    """
+    document = factories.DocumentFactory()
+
+    # pylint: disable-next=no-member
+    assert len(mail.outbox) == 0
+
+    sender = factories.UserFactory(full_name="Test Sender", email="sender@example.com")
+    document.send_invitation_email(
+        "guest@example.com", models.RoleChoices.EDITOR, sender, "en"
+    )
+
+    # pylint: disable-next=no-member
+    assert len(mail.outbox) == 1
+
+    # pylint: disable-next=no-member
+    email = mail.outbox[0]
+
+    assert email.to == ["guest@example.com"]
+    email_content = " ".join(email.body.split())
+
+    assert (
+        f"Test Sender (sender@example.com) invited you with the role &quot;editor&quot; "
+        f"on the following document: {document.title}" in email_content
+    )
+    assert f"docs/{document.id}/" in email_content
+
+
+def test_models_documents__email_invitation__success_fr():
+    """
+    The email invitation is sent successfully in french.
+    """
+    document = factories.DocumentFactory()
+
+    # pylint: disable-next=no-member
+    assert len(mail.outbox) == 0
+
+    sender = factories.UserFactory(
+        full_name="Test Sender2", email="sender2@example.com"
+    )
+    document.send_invitation_email(
+        "guest2@example.com",
+        models.RoleChoices.OWNER,
+        sender,
+        "fr-fr",
+    )
+
+    # pylint: disable-next=no-member
+    assert len(mail.outbox) == 1
+
+    # pylint: disable-next=no-member
+    email = mail.outbox[0]
+
+    assert email.to == ["guest2@example.com"]
+    email_content = " ".join(email.body.split())
+
+    assert (
+        f"Test Sender2 (sender2@example.com) vous a invité avec le rôle &quot;propriétaire&quot; "
+        f"sur le document suivant: {document.title}" in email_content
+    )
+    assert f"docs/{document.id}/" in email_content
+
+
+@mock.patch(
+    "core.models.send_mail",
+    side_effect=smtplib.SMTPException("Error SMTPException"),
+)
+@mock.patch.object(Logger, "error")
+def test_models_documents__email_invitation__failed(mock_logger, _mock_send_mail):
+    """Check mail behavior when an SMTP error occurs when sent an email invitation."""
+    document = factories.DocumentFactory()
+
+    # pylint: disable-next=no-member
+    assert len(mail.outbox) == 0
+
+    sender = factories.UserFactory()
+    document.send_invitation_email(
+        "guest3@example.com",
+        models.RoleChoices.ADMIN,
+        sender,
+        "en",
+    )
+
+    # No email has been sent
+    # pylint: disable-next=no-member
+    assert len(mail.outbox) == 0
+
+    # Logger should be called
+    mock_logger.assert_called_once()
+
+    (
+        _,
+        emails,
+        exception,
+    ) = mock_logger.call_args.args
+
+    assert emails == ["guest3@example.com"]
+    assert isinstance(exception, smtplib.SMTPException)

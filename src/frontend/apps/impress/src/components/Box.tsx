@@ -1,6 +1,6 @@
 import { ComponentPropsWithRef, ReactHTML } from 'react';
 import styled from 'styled-components';
-import { CSSProperties } from 'styled-components/dist/types';
+import { CSSProperties, RuleSet } from 'styled-components/dist/types';
 
 import {
   MarginPadding,
@@ -15,13 +15,13 @@ export interface BoxProps {
   $align?: CSSProperties['alignItems'];
   $background?: CSSProperties['background'];
   $color?: CSSProperties['color'];
-  $css?: string;
+  $css?: string | RuleSet<object>;
   $direction?: CSSProperties['flexDirection'];
   $display?: CSSProperties['display'];
   $effect?: 'show' | 'hide';
-  $flex?: boolean;
+  $flex?: CSSProperties['flex'];
   $gap?: CSSProperties['gap'];
-  $hasTransition?: boolean;
+  $hasTransition?: boolean | 'slow';
   $height?: CSSProperties['height'];
   $justify?: CSSProperties['justifyContent'];
   $overflow?: CSSProperties['overflow'];
@@ -33,6 +33,7 @@ export interface BoxProps {
   $padding?: MarginPadding;
   $position?: CSSProperties['position'];
   $radius?: CSSProperties['borderRadius'];
+  $shrink?: CSSProperties['flexShrink'];
   $transition?: CSSProperties['transition'];
   $width?: CSSProperties['width'];
   $wrap?: CSSProperties['flexWrap'];
@@ -49,11 +50,15 @@ export const Box = styled('div')<BoxProps>`
   ${({ $color }) => $color && `color: ${$color};`}
   ${({ $direction }) => $direction && `flex-direction: ${$direction};`}
   ${({ $display }) => $display && `display: ${$display};`}
-  ${({ $flex }) => $flex === false && `display: block;`}
+  ${({ $flex }) => $flex && `flex: ${$flex};`}
   ${({ $gap }) => $gap && `gap: ${$gap};`}
   ${({ $height }) => $height && `height: ${$height};`}
   ${({ $hasTransition }) =>
-    $hasTransition && `transition: all 0.3s ease-in-out;`}
+    $hasTransition && $hasTransition === 'slow'
+      ? `transition: all 0.5s ease-in-out;`
+      : $hasTransition
+        ? `transition: all 0.3s ease-in-out;`
+        : ''}
   ${({ $justify }) => $justify && `justify-content: ${$justify};`}
   ${({ $margin }) => $margin && stylesMargin($margin)}
   ${({ $maxHeight }) => $maxHeight && `max-height: ${$maxHeight};`}
@@ -64,10 +69,11 @@ export const Box = styled('div')<BoxProps>`
   ${({ $padding }) => $padding && stylesPadding($padding)}
   ${({ $position }) => $position && `position: ${$position};`}
   ${({ $radius }) => $radius && `border-radius: ${$radius};`}
+  ${({ $shrink }) => $shrink && `flex-shrink: ${$shrink};`}
   ${({ $transition }) => $transition && `transition: ${$transition};`}
   ${({ $width }) => $width && `width: ${$width};`}
   ${({ $wrap }) => $wrap && `flex-wrap: ${$wrap};`}
-  ${({ $css }) => $css && `${$css};`}
+  ${({ $css }) => $css && (typeof $css === 'string' ? `${$css};` : $css)}
   ${({ $zIndex }) => $zIndex && `z-index: ${$zIndex};`}
   ${({ $effect }) => {
     let effect;

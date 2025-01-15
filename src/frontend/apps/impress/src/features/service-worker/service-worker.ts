@@ -47,9 +47,13 @@ setCacheNameDetails({
 const getStrategy = (
   options?: NetworkFirstOptions | StrategyOptions,
 ): NetworkFirst | CacheFirst => {
-  return SW_DEV_URL.some((devDomain) =>
+  const isDev = SW_DEV_URL.some((devDomain) =>
     self.location.origin.includes(devDomain),
-  ) || isApiUrl(self.location.href)
+  );
+  const isApi = isApiUrl(self.location.href);
+  const isHTMLRequest = options?.cacheName?.includes('html');
+
+  return isDev || isApi || isHTMLRequest
     ? new NetworkFirst(options)
     : new CacheFirst(options);
 };
@@ -77,7 +81,7 @@ self.addEventListener('activate', function (event) {
           }),
         );
       })
-      .then(void self.clients.claim()),
+      .then(() => self.clients.claim()),
   );
 });
 
@@ -87,7 +91,6 @@ self.addEventListener('activate', function (event) {
 const FALLBACK = {
   offline: '/offline/',
   docs: '/docs/[id]/',
-  versions: '/docs/[id]/versions/[versionId]/',
   images: '/assets/img-not-found.svg',
 };
 const precacheResources = [
@@ -100,7 +103,6 @@ const precacheResources = [
   FALLBACK.offline,
   FALLBACK.images,
   FALLBACK.docs,
-  FALLBACK.versions,
 ];
 
 const precacheStrategy = getStrategy({
@@ -121,12 +123,6 @@ setCatchHandler(async ({ request, url, event }) => {
     case request.destination === 'document':
       if (url.pathname.match(/^\/docs\/([a-z0-9\-]+)\/$/g)) {
         return precacheStrategy.handle({ event, request: FALLBACK.docs });
-      } else if (
-        url.pathname.match(
-          /^\/docs\/([a-z0-9\-]+)\/versions\/([a-z0-9\-]+)\/$/g,
-        )
-      ) {
-        return precacheStrategy.handle({ event, request: FALLBACK.versions });
       }
 
       return precacheStrategy.handle({ event, request: FALLBACK.offline });
@@ -138,6 +134,18 @@ setCatchHandler(async ({ request, url, event }) => {
       return Response.error();
   }
 });
+
+// HTML documents
+registerRoute(
+  ({ request }) => request.destination === 'document',
+  new NetworkFirst({
+    cacheName: getCacheNameVersion('html'),
+    plugins: [
+      new CacheableResponsePlugin({ statuses: [0, 200] }),
+      new ExpirationPlugin({ maxAgeSeconds: 24 * 60 * 60 * DAYS_EXP }),
+    ],
+  }),
+);
 
 /**
  * External urls cache strategy

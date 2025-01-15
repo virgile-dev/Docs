@@ -4,6 +4,46 @@ repositories:
   oci: true
 
 releases:
+  - name: keycloak
+    installed: {{ eq .Environment.Name "dev" | toYaml }}
+    missingFileHandler: Warn
+    namespace: {{ .Namespace }}
+    chart: bitnami/keycloak
+    version: 17.3.6
+    values:
+      - postgresql:
+          auth:
+            username: keycloak
+            password: keycloak
+            database: keycloak
+      - extraEnvVars:
+          - name: KEYCLOAK_EXTRA_ARGS
+            value: "--import-realm"
+          - name: KC_HOSTNAME_URL
+            value: https://keycloak.127.0.0.1.nip.io
+      - extraVolumes:
+          - name: import
+            configMap:
+              name: docs-keycloak
+      - extraVolumeMounts:
+          - name: import
+            mountPath: /opt/bitnami/keycloak/data/import/
+      - auth:
+          adminUser: su
+          adminPassword: su
+      - proxy: edge
+      - ingress:
+          enabled: true
+          hostname: keycloak.127.0.0.1.nip.io
+      - extraDeploy:
+        - apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: docs-keycloak
+          data:
+            impress.json: |
+{{ readFile "../../docker/auth/realm.json" | replace "http://localhost:3200" "https://impress.127.0.0.1.nip.io" | indent 14 }}
+
   - name: postgres
     installed: {{ eq .Environment.Name "dev" | toYaml }}
     namespace: {{ .Namespace }}
@@ -25,7 +65,7 @@ releases:
     version: 12.10.10
     values: 
       - auth:
-          rootUser: impress
+          rootUser: root
           rootPassword: password
       - provisioning:
           enabled: true
@@ -37,18 +77,11 @@ releases:
     installed: {{ eq .Environment.Name "dev" | toYaml }}
     namespace: {{ .Namespace }}
     chart: bitnami/redis
-    version: 18.19.2
+    version: 20.6.2
     values:
       - auth:
           password: pass
         architecture: standalone
-
-  - name: extra
-    installed: {{ ne .Environment.Name "dev" | toYaml }}
-    namespace: {{ .Namespace }}
-    chart: ./extra
-    secrets:
-      - env.d/{{ .Environment.Name }}/secrets.enc.yaml
 
   - name: impress
     version: {{ .Values.version }}
@@ -56,27 +89,8 @@ releases:
     chart: ./impress
     values:
       - env.d/{{ .Environment.Name }}/values.impress.yaml.gotmpl
-    secrets:
-      - env.d/{{ .Environment.Name }}/secrets.enc.yaml
 
 environments:
   dev:
     values:
-      - version: 0.0.1
-    secrets:
-      - env.d/{{ .Environment.Name }}/secrets.enc.yaml
-  staging:
-    values:
-      - version: 0.0.1
-    secrets:
-      - env.d/{{ .Environment.Name }}/secrets.enc.yaml
-  preprod:
-    values:
-      - version: 0.0.1
-    secrets:
-      - env.d/{{ .Environment.Name }}/secrets.enc.yaml
-  production:
-    values:
-      - version: 0.0.1
-    secrets:
-      - env.d/{{ .Environment.Name }}/secrets.enc.yaml
+      - version: 2.0.0

@@ -2,33 +2,151 @@ import path from 'path';
 
 import { expect, test } from '@playwright/test';
 
-import { createDoc, goToGridDoc, mockedDocument } from './common';
+import {
+  createDoc,
+  goToGridDoc,
+  mockedDocument,
+  verifyDocName,
+} from './common';
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
 
 test.describe('Doc Editor', () => {
-  test('checks the Doc is connected to the provider server', async ({
+  test('it check translations of the slash menu when changing language', async ({
     page,
     browserName,
   }) => {
-    const webSocketPromise = page.waitForEvent('websocket', (webSocket) => {
-      return webSocket.url().includes('ws://localhost:4444/');
+    await createDoc(page, 'doc-toolbar', browserName, 1);
+
+    const header = page.locator('header').first();
+    const editor = page.locator('.ProseMirror');
+    // Trigger slash menu to show english menu
+    await editor.click();
+    await editor.fill('/');
+    await expect(page.getByText('Headings', { exact: true })).toBeVisible();
+    await header.click();
+    await expect(page.getByText('Headings', { exact: true })).toBeHidden();
+
+    // Reset menu
+    await editor.click();
+    await editor.fill('');
+
+    // Change language to French
+    await header.click();
+    await header.getByRole('combobox').getByText('English').click();
+    await header.getByRole('option', { name: 'Français' }).click();
+    await expect(
+      header.getByRole('combobox').getByText('Français'),
+    ).toBeVisible();
+
+    // Trigger slash menu to show french menu
+    await editor.click();
+    await editor.fill('/');
+    await expect(page.getByText('Titres', { exact: true })).toBeVisible();
+    await header.click();
+    await expect(page.getByText('Titres', { exact: true })).toBeHidden();
+  });
+
+  test('it checks default toolbar buttons are displayed', async ({
+    page,
+    browserName,
+  }) => {
+    await createDoc(page, 'doc-toolbar', browserName, 1);
+
+    const editor = page.locator('.ProseMirror');
+    await editor.click();
+    await editor.fill('test content');
+
+    await editor.getByText('test content').dblclick();
+
+    const toolbar = page.locator('.bn-formatting-toolbar');
+    await expect(toolbar.locator('button[data-test="bold"]')).toBeVisible();
+    await expect(toolbar.locator('button[data-test="italic"]')).toBeVisible();
+    await expect(
+      toolbar.locator('button[data-test="underline"]'),
+    ).toBeVisible();
+    await expect(toolbar.locator('button[data-test="strike"]')).toBeVisible();
+    await expect(
+      toolbar.locator('button[data-test="alignTextLeft"]'),
+    ).toBeVisible();
+    await expect(
+      toolbar.locator('button[data-test="alignTextCenter"]'),
+    ).toBeVisible();
+    await expect(
+      toolbar.locator('button[data-test="alignTextRight"]'),
+    ).toBeVisible();
+    await expect(toolbar.locator('button[data-test="colors"]')).toBeVisible();
+    await expect(
+      toolbar.locator('button[data-test="unnestBlock"]'),
+    ).toBeVisible();
+    await expect(
+      toolbar.locator('button[data-test="createLink"]'),
+    ).toBeVisible();
+  });
+
+  /**
+   * We check:
+   *  - connection to the collaborative server
+   *  - signal of the backend to the collaborative server (connection should close)
+   *  - reconnection to the collaborative server
+   */
+  test('checks the connection with collaborative server', async ({
+    page,
+    browserName,
+  }) => {
+    let webSocketPromise = page.waitForEvent('websocket', (webSocket) => {
+      return webSocket
+        .url()
+        .includes('ws://localhost:8083/collaboration/ws/?room=');
     });
 
     const randomDoc = await createDoc(page, 'doc-editor', browserName, 1);
-    await expect(page.locator('h2').getByText(randomDoc[0])).toBeVisible();
+    await verifyDocName(page, randomDoc[0]);
 
-    const webSocket = await webSocketPromise;
-    expect(webSocket.url()).toContain('ws://localhost:4444/');
+    let webSocket = await webSocketPromise;
+    expect(webSocket.url()).toContain(
+      'ws://localhost:8083/collaboration/ws/?room=',
+    );
 
-    const framesentPromise = webSocket.waitForEvent('framesent');
+    // Is connected
+    let framesentPromise = webSocket.waitForEvent('framesent');
 
     await page.locator('.ProseMirror.bn-editor').click();
     await page.locator('.ProseMirror.bn-editor').fill('Hello World');
 
-    const framesent = await framesentPromise;
+    let framesent = await framesentPromise;
+    expect(framesent.payload).not.toBeNull();
+
+    await page.getByRole('button', { name: 'Share' }).click();
+
+    const selectVisibility = page.getByLabel('Visibility', { exact: true });
+
+    // When the visibility is changed, the ws should closed the connection (backend signal)
+    const wsClosePromise = webSocket.waitForEvent('close');
+
+    await selectVisibility.click();
+    await page
+      .getByRole('button', {
+        name: 'Connected',
+      })
+      .click();
+
+    // Assert that the doc reconnects to the ws
+    const wsClose = await wsClosePromise;
+    expect(wsClose.isClosed()).toBeTruthy();
+
+    // Checkt the ws is connected again
+    webSocketPromise = page.waitForEvent('websocket', (webSocket) => {
+      return webSocket
+        .url()
+        .includes('ws://localhost:8083/collaboration/ws/?room=');
+    });
+
+    webSocket = await webSocketPromise;
+    framesentPromise = webSocket.waitForEvent('framesent');
+    framesent = await framesentPromise;
     expect(framesent.payload).not.toBeNull();
   });
 
@@ -38,21 +156,20 @@ test.describe('Doc Editor', () => {
   }) => {
     const randomDoc = await createDoc(page, 'doc-markdown', browserName, 1);
 
-    await expect(page.locator('h2').getByText(randomDoc[0])).toBeVisible();
+    await verifyDocName(page, randomDoc[0]);
 
-    await page.locator('.ProseMirror.bn-editor').click();
-    await page
-      .locator('.ProseMirror.bn-editor')
-      .fill('[test markdown](http://test-markdown.html)');
+    const editor = page.locator('.ProseMirror');
+    await editor.click();
+    await editor.fill('[test markdown](http://test-markdown.html)');
 
-    await expect(page.getByText('[test markdown]')).toBeVisible();
+    await expect(editor.getByText('[test markdown]')).toBeVisible();
 
-    await page.getByText('[test markdown]').dblclick();
+    await editor.getByText('[test markdown]').dblclick();
     await page.locator('button[data-test="convertMarkdown"]').click();
 
-    await expect(page.getByText('[test markdown]')).toBeHidden();
+    await expect(editor.getByText('[test markdown]')).toBeHidden();
     await expect(
-      page.getByRole('link', {
+      editor.getByRole('link', {
         name: 'test markdown',
       }),
     ).toHaveAttribute('href', 'http://test-markdown.html');
@@ -60,54 +177,68 @@ test.describe('Doc Editor', () => {
 
   test('it renders correctly when we switch from one doc to another', async ({
     page,
+    browserName,
   }) => {
     // Check the first doc
-    const firstDoc = await goToGridDoc(page);
-    await expect(page.locator('h2').getByText(firstDoc)).toBeVisible();
-    await page.locator('.ProseMirror.bn-editor').click();
-    await page.locator('.ProseMirror.bn-editor').fill('Hello World Doc 1');
-    await expect(page.getByText('Hello World Doc 1')).toBeVisible();
+    const [firstDoc] = await createDoc(page, 'doc-switch-1', browserName, 1);
+    await verifyDocName(page, firstDoc);
+
+    const editor = page.locator('.ProseMirror');
+    await editor.click();
+    await editor.fill('Hello World Doc 1');
+    await expect(editor.getByText('Hello World Doc 1')).toBeVisible();
 
     // Check the second doc
-    const secondDoc = await goToGridDoc(page, {
-      nthRow: 2,
-    });
-    await expect(page.locator('h2').getByText(secondDoc)).toBeVisible();
-    await expect(page.getByText('Hello World Doc 1')).toBeHidden();
-    await page.locator('.ProseMirror.bn-editor').click();
-    await page.locator('.ProseMirror.bn-editor').fill('Hello World Doc 2');
-    await expect(page.getByText('Hello World Doc 2')).toBeVisible();
+    const [secondDoc] = await createDoc(page, 'doc-switch-2', browserName, 1);
+    await verifyDocName(page, secondDoc);
+
+    await expect(editor.getByText('Hello World Doc 1')).toBeHidden();
+    await editor.click();
+    await editor.fill('Hello World Doc 2');
+    await expect(editor.getByText('Hello World Doc 2')).toBeVisible();
 
     // Check the first doc again
     await goToGridDoc(page, {
       title: firstDoc,
     });
-    await expect(page.locator('h2').getByText(firstDoc)).toBeVisible();
-    await expect(page.getByText('Hello World Doc 2')).toBeHidden();
-    await expect(page.getByText('Hello World Doc 1')).toBeVisible();
+    await verifyDocName(page, firstDoc);
+    await expect(editor.getByText('Hello World Doc 2')).toBeHidden();
+    await expect(editor.getByText('Hello World Doc 1')).toBeVisible();
+
+    await page
+      .getByRole('button', {
+        name: 'New doc',
+      })
+      .click();
+
+    await expect(editor.getByText('Hello World Doc 1')).toBeHidden();
+    await expect(editor.getByText('Hello World Doc 2')).toBeHidden();
   });
 
-  test('it saves the doc when we change pages', async ({ page }) => {
+  test('it saves the doc when we change pages', async ({
+    page,
+    browserName,
+  }) => {
     // Check the first doc
-    const doc = await goToGridDoc(page);
-    await expect(page.locator('h2').getByText(doc)).toBeVisible();
-    await page.locator('.ProseMirror.bn-editor').click();
-    await page
-      .locator('.ProseMirror.bn-editor')
-      .fill('Hello World Doc persisted 1');
-    await expect(page.getByText('Hello World Doc persisted 1')).toBeVisible();
+    const [doc] = await createDoc(page, 'doc-saves-change', browserName, 1);
+    await verifyDocName(page, doc);
+
+    const editor = page.locator('.ProseMirror');
+    await editor.click();
+    await editor.fill('Hello World Doc persisted 1');
+    await expect(editor.getByText('Hello World Doc persisted 1')).toBeVisible();
 
     const secondDoc = await goToGridDoc(page, {
       nthRow: 2,
     });
 
-    await expect(page.locator('h2').getByText(secondDoc)).toBeVisible();
+    await verifyDocName(page, secondDoc);
 
     await goToGridDoc(page, {
       title: doc,
     });
 
-    await expect(page.getByText('Hello World Doc persisted 1')).toBeVisible();
+    await expect(editor.getByText('Hello World Doc persisted 1')).toBeVisible();
   });
 
   test('it saves the doc when we quit pages', async ({ page, browserName }) => {
@@ -116,12 +247,13 @@ test.describe('Doc Editor', () => {
 
     // Check the first doc
     const doc = await goToGridDoc(page);
-    await expect(page.locator('h2').getByText(doc)).toBeVisible();
-    await page.locator('.ProseMirror.bn-editor').click();
-    await page
-      .locator('.ProseMirror.bn-editor')
-      .fill('Hello World Doc persisted 2');
-    await expect(page.getByText('Hello World Doc persisted 2')).toBeVisible();
+
+    await verifyDocName(page, doc);
+
+    const editor = page.locator('.ProseMirror');
+    await editor.click();
+    await editor.fill('Hello World Doc persisted 2');
+    await expect(editor.getByText('Hello World Doc persisted 2')).toBeVisible();
 
     await page.goto('/');
 
@@ -129,7 +261,7 @@ test.describe('Doc Editor', () => {
       title: doc,
     });
 
-    await expect(page.getByText('Hello World Doc persisted 2')).toBeVisible();
+    await expect(editor.getByText('Hello World Doc persisted 2')).toBeVisible();
   });
 
   test('it cannot edit if viewer', async ({ page }) => {
@@ -140,7 +272,7 @@ test.describe('Doc Editor', () => {
         versions_destroy: false,
         versions_list: true,
         versions_retrieve: true,
-        manage_accesses: false, // Means not admin
+        accesses_manage: false, // Means not admin
         update: false,
         partial_update: false, // Means not editor
         retrieve: true,
@@ -149,13 +281,14 @@ test.describe('Doc Editor', () => {
 
     await goToGridDoc(page);
 
-    await expect(
-      page.getByText('Read only, you cannot edit this document.'),
-    ).toBeVisible();
+    const card = page.getByLabel('It is the card information');
+    await expect(card).toBeVisible();
+
+    await expect(card.getByText('Reader')).toBeVisible();
   });
 
-  test('it adds an image to the doc editor', async ({ page }) => {
-    await goToGridDoc(page);
+  test('it adds an image to the doc editor', async ({ page, browserName }) => {
+    await createDoc(page, 'doc-image', browserName, 1);
 
     const fileChooserPromise = page.waitForEvent('filechooser');
 
@@ -179,5 +312,58 @@ test.describe('Doc Editor', () => {
     expect(await image.getAttribute('src')).toMatch(
       /http:\/\/localhost:8083\/media\/.*\/attachments\/.*.png/,
     );
+  });
+
+  test('it checks the AI buttons', async ({ page, browserName }) => {
+    await page.route(/.*\/ai-translate\//, async (route) => {
+      const request = route.request();
+      if (request.method().includes('POST')) {
+        await route.fulfill({
+          json: {
+            answer: 'Bonjour le monde',
+          },
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await createDoc(page, 'doc-ai', browserName, 1);
+
+    await page.locator('.bn-block-outer').last().fill('Hello World');
+
+    const editor = page.locator('.ProseMirror');
+    await editor.getByText('Hello').dblclick();
+
+    await page.getByRole('button', { name: 'AI' }).click();
+
+    await expect(
+      page.getByRole('menuitem', { name: 'Use as prompt' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('menuitem', { name: 'Rephrase' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('menuitem', { name: 'Summarize' }),
+    ).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Correct' })).toBeVisible();
+    await expect(
+      page.getByRole('menuitem', { name: 'Language' }),
+    ).toBeVisible();
+
+    await page.getByRole('menuitem', { name: 'Language' }).hover();
+    await expect(
+      page.getByRole('menuitem', { name: 'English', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('menuitem', { name: 'French', exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('menuitem', { name: 'German', exact: true }),
+    ).toBeVisible();
+
+    await page.getByRole('menuitem', { name: 'English', exact: true }).click();
+
+    await expect(editor.getByText('Bonjour le monde')).toBeVisible();
   });
 });

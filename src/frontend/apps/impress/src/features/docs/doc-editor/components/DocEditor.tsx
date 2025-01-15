@@ -1,102 +1,116 @@
-import { Alert, Loader, VariantType } from '@openfun/cunningham-react';
-import { useRouter as useNavigate } from 'next/navigation';
+import { Loader } from '@openfun/cunningham-react';
 import { useRouter } from 'next/router';
-import React from 'react';
-import { useTranslation } from 'react-i18next';
+import { useEffect, useState } from 'react';
+import { css } from 'styled-components';
+import * as Y from 'yjs';
 
-import { Box, Card, Text, TextErrors } from '@/components';
-import { Panel } from '@/components/Panel';
+import { Box, Text, TextErrors } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
-import { DocHeader } from '@/features/docs/doc-header';
-import { Doc } from '@/features/docs/doc-management';
-import { TableContent } from '@/features/docs/doc-table-content';
+import { DocHeader, DocVersionHeader } from '@/features/docs/doc-header/';
 import {
-  VersionList,
-  Versions,
-  useDocVersion,
-  useDocVersionStore,
-} from '@/features/docs/doc-versioning/';
+  Doc,
+  base64ToBlocknoteXmlFragment,
+  useProviderStore,
+} from '@/features/docs/doc-management';
+import { TableContent } from '@/features/docs/doc-table-content/';
+import { Versions, useDocVersion } from '@/features/docs/doc-versioning/';
+import { useResponsiveStore } from '@/stores';
 
-import { BlockNoteEditor } from './BlockNoteEditor';
+import { BlockNoteEditor, BlockNoteEditorVersion } from './BlockNoteEditor';
 
 interface DocEditorProps {
   doc: Doc;
+  versionId?: Versions['version_id'];
 }
 
-export const DocEditor = ({ doc }: DocEditorProps) => {
-  const {
-    query: { versionId },
-  } = useRouter();
-  const { isPanelVersionOpen, setIsPanelVersionOpen } = useDocVersionStore();
-  const { t } = useTranslation();
+export const DocEditor = ({ doc, versionId }: DocEditorProps) => {
+  const { isDesktop } = useResponsiveStore();
 
-  const isVersion = versionId && typeof versionId === 'string';
+  const isVersion = !!versionId && typeof versionId === 'string';
 
   const { colorsTokens } = useCunninghamTheme();
 
+  const { provider } = useProviderStore();
+
+  if (!provider) {
+    return null;
+  }
+
   return (
     <>
-      <DocHeader doc={doc} versionId={versionId as Versions['version_id']} />
-      {!doc.abilities.partial_update && (
-        <Box $margin={{ all: 'small', top: 'none' }}>
-          <Alert type={VariantType.WARNING}>
-            {t(`Read only, you cannot edit this document.`)}
-          </Alert>
+      {isDesktop && !isVersion && (
+        <Box
+          $position="absolute"
+          $css={css`
+            top: 72px;
+            right: 20px;
+          `}
+        >
+          <TableContent />
         </Box>
       )}
-      {isVersion && (
-        <Box $margin={{ all: 'small', top: 'none' }}>
-          <Alert type={VariantType.WARNING}>
-            {t(`Read only, you cannot edit document versions.`)}
-          </Alert>
-        </Box>
-      )}
-      <Box
-        $background={colorsTokens()['primary-bg']}
-        $height="100%"
-        $direction="row"
-        $margin={{ all: 'small', top: 'none' }}
-        $gap="1rem"
-      >
-        <Card $padding="big" $css="flex:1;" $overflow="auto">
+      <Box $maxWidth="868px" $width="100%" $height="100%">
+        <Box $padding={{ horizontal: isDesktop ? '54px' : 'base' }}>
           {isVersion ? (
-            <DocVersionEditor doc={doc} versionId={versionId} />
+            <DocVersionHeader title={doc.title} />
           ) : (
-            <BlockNoteEditor doc={doc} />
+            <DocHeader doc={doc} />
           )}
-        </Card>
-        {doc.abilities.versions_list && isPanelVersionOpen && (
-          <Panel title={t('VERSIONS')} setIsPanelOpen={setIsPanelVersionOpen}>
-            <VersionList doc={doc} />
-          </Panel>
-        )}
-        <TableContent doc={doc} />
+        </Box>
+
+        <Box
+          $background={colorsTokens()['primary-bg']}
+          $direction="row"
+          $width="100%"
+          $css="overflow-x: clip; flex: 1;"
+          $position="relative"
+        >
+          <Box $css="flex:1;" $overflow="auto" $position="relative">
+            {isVersion ? (
+              <DocVersionEditor docId={doc.id} versionId={versionId} />
+            ) : (
+              <BlockNoteEditor doc={doc} provider={provider} />
+            )}
+          </Box>
+        </Box>
       </Box>
     </>
   );
 };
 
 interface DocVersionEditorProps {
-  doc: Doc;
+  docId: Doc['id'];
   versionId: Versions['version_id'];
 }
 
-export const DocVersionEditor = ({ doc, versionId }: DocVersionEditorProps) => {
+export const DocVersionEditor = ({
+  docId,
+  versionId,
+}: DocVersionEditorProps) => {
   const {
     data: version,
     isLoading,
     isError,
     error,
   } = useDocVersion({
-    docId: doc.id,
+    docId,
     versionId,
   });
 
-  const navigate = useNavigate();
+  const { replace } = useRouter();
+  const [initialContent, setInitialContent] = useState<Y.XmlFragment>();
+
+  useEffect(() => {
+    if (!version?.content) {
+      return;
+    }
+
+    setInitialContent(base64ToBlocknoteXmlFragment(version.content));
+  }, [version?.content]);
 
   if (isError && error) {
     if (error.status === 404) {
-      navigate.replace(`/404`);
+      void replace(`/404`);
       return null;
     }
 
@@ -116,7 +130,7 @@ export const DocVersionEditor = ({ doc, versionId }: DocVersionEditorProps) => {
     );
   }
 
-  if (isLoading || !version) {
+  if (isLoading || !version || !initialContent) {
     return (
       <Box $align="center" $justify="center" $height="100%">
         <Loader />
@@ -124,5 +138,5 @@ export const DocVersionEditor = ({ doc, versionId }: DocVersionEditorProps) => {
     );
   }
 
-  return <BlockNoteEditor doc={doc} version={version} />;
+  return <BlockNoteEditorVersion initialContent={initialContent} />;
 };

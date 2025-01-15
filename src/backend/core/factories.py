@@ -22,8 +22,28 @@ class UserFactory(factory.django.DjangoModelFactory):
 
     sub = factory.Sequence(lambda n: f"user{n!s}")
     email = factory.Faker("email")
+    full_name = factory.Faker("name")
+    short_name = factory.Faker("first_name")
     language = factory.fuzzy.FuzzyChoice([lang[0] for lang in settings.LANGUAGES])
     password = make_password("password")
+
+    @factory.post_generation
+    def with_owned_document(self, create, extracted, **kwargs):
+        """
+        Create a document for which the user is owner to check
+        that there is no interference
+        """
+        if create and (extracted is True):
+            UserDocumentAccessFactory(user=self, role="owner")
+
+    @factory.post_generation
+    def with_owned_template(self, create, extracted, **kwargs):
+        """
+        Create a template for which the user is owner to check
+        that there is no interference
+        """
+        if create and (extracted is True):
+            UserTemplateAccessFactory(user=self, role="owner")
 
 
 class DocumentFactory(factory.django.DjangoModelFactory):
@@ -36,6 +56,7 @@ class DocumentFactory(factory.django.DjangoModelFactory):
 
     title = factory.Sequence(lambda n: f"document{n}")
     content = factory.Sequence(lambda n: f"content{n}")
+    creator = factory.SubFactory(UserFactory)
     link_reach = factory.fuzzy.FuzzyChoice(
         [a[0] for a in models.LinkReachChoices.choices]
     )
@@ -59,6 +80,13 @@ class DocumentFactory(factory.django.DjangoModelFactory):
         if create and extracted:
             for item in extracted:
                 models.LinkTrace.objects.create(document=self, user=item)
+
+    @factory.post_generation
+    def favorited_by(self, create, extracted, **kwargs):
+        """Mark document as favorited by a list of users."""
+        if create and extracted:
+            for item in extracted:
+                models.DocumentFavorite.objects.create(document=self, user=item)
 
 
 class UserDocumentAccessFactory(factory.django.DjangoModelFactory):

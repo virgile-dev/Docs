@@ -1,90 +1,25 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { css } from 'styled-components';
 
-import { Box, BoxButton, Text } from '@/components';
-import { Panel } from '@/components/Panel';
-import { useDocStore } from '@/features/docs/doc-editor';
-import { Doc } from '@/features/docs/doc-management';
-
-import { useDocTableContentStore } from '../stores';
+import { Box, BoxButton, Icon, Text } from '@/components';
+import { useCunninghamTheme } from '@/cunningham';
+import { useEditorStore, useHeadingStore } from '@/features/docs/doc-editor';
+import { MAIN_LAYOUT_ID } from '@/layouts/conf';
 
 import { Heading } from './Heading';
 
-const recursiveTextContent = (content: HeadingBlock['content']): string => {
-  if (!content) {
-    return '';
-  }
-
-  return content.reduce((acc, content) => {
-    if (content.type === 'text') {
-      return acc + content.text;
-    } else if (content.type === 'link') {
-      return acc + recursiveTextContent(content.content);
-    }
-
-    return acc;
-  }, '');
-};
-
-type HeadingBlock = {
-  id: string;
-  type: string;
-  text: string;
-  content: HeadingBlock[];
-  contentText: string;
-  props: {
-    level: number;
-  };
-};
-
-interface TableContentProps {
-  doc: Doc;
-}
-
-export const TableContent = ({ doc }: TableContentProps) => {
-  const { docsStore } = useDocStore();
-  const { t } = useTranslation();
-
-  const editor = docsStore?.[doc.id]?.editor;
-  const headingFiltering = useCallback(
-    () =>
-      editor?.document
-        .filter((block) => block.type === 'heading')
-        .map((block) => ({
-          ...block,
-          contentText: recursiveTextContent(
-            block.content as unknown as HeadingBlock['content'],
-          ),
-        })) as unknown as HeadingBlock[],
-    [editor?.document],
-  );
-
-  const [headings, setHeadings] = useState<HeadingBlock[]>();
-  const { setIsPanelTableContentOpen, isPanelTableContentOpen } =
-    useDocTableContentStore();
-  const [hasBeenClose, setHasBeenClose] = useState(false);
-  const setClosePanel = () => {
-    setHasBeenClose(true);
-    setIsPanelTableContentOpen(false);
-  };
+export const TableContent = () => {
+  const { headings } = useHeadingStore();
+  const { editor } = useEditorStore();
+  const { spacingsTokens } = useCunninghamTheme();
+  const spacing = spacingsTokens();
 
   const [headingIdHighlight, setHeadingIdHighlight] = useState<string>();
 
-  // Open the panel if there are more than 1 heading
-  useEffect(() => {
-    if (headings?.length && headings.length > 1 && !hasBeenClose) {
-      setIsPanelTableContentOpen(true);
-    }
-  }, [setIsPanelTableContentOpen, headings, hasBeenClose]);
+  const { t } = useTranslation();
+  const [isHover, setIsHover] = useState(false);
 
-  // Close the panel unmount
-  useEffect(() => {
-    return () => {
-      setIsPanelTableContentOpen(false);
-    };
-  }, [setIsPanelTableContentOpen]);
-
-  // To highlight the first heading in the viewport
   useEffect(() => {
     const handleScroll = () => {
       if (!headings) {
@@ -113,7 +48,7 @@ export const TableContent = ({ doc }: TableContentProps) => {
       }
     };
 
-    window.addEventListener('scroll', () => {
+    document.getElementById(MAIN_LAYOUT_ID)?.addEventListener('scroll', () => {
       setTimeout(() => {
         handleScroll();
       }, 300);
@@ -126,72 +61,112 @@ export const TableContent = ({ doc }: TableContentProps) => {
     };
   }, [headings, setHeadingIdHighlight]);
 
-  if (!editor) {
-    return null;
-  }
+  const onOpen = () => {
+    setIsHover(true);
+    setTimeout(() => {
+      const element = document.getElementById(`heading-${headingIdHighlight}`);
 
-  // Update the headings when the editor content changes
-  editor?.onEditorContentChange(() => {
-    setHeadings(headingFiltering());
-  });
+      element?.scrollIntoView({
+        behavior: 'instant',
+        inline: 'center',
+        block: 'center',
+      });
+    }, 0); // 300ms is the transition time of the box
+  };
 
-  if (!isPanelTableContentOpen) {
+  const onClose = () => {
+    setIsHover(false);
+  };
+
+  if (
+    !editor ||
+    !headings ||
+    headings.length === 0 ||
+    (headings.length === 1 && !headings[0].contentText)
+  ) {
     return null;
   }
 
   return (
-    <Panel setIsPanelOpen={setClosePanel}>
-      <Box $padding="small" $maxHeight="95%">
-        <Box $overflow="auto">
-          {headings?.map((heading) => (
-            <Heading
-              editor={editor}
-              headingId={heading.id}
-              level={heading.props.level}
-              text={heading.contentText}
-              key={heading.id}
-              isHighlight={headingIdHighlight === heading.id}
-            />
-          ))}
-        </Box>
+    <Box
+      id="summaryContainer"
+      $width={!isHover ? '40px' : '200px'}
+      $height={!isHover ? '40px' : 'auto'}
+      $maxHeight="calc(50vh - 60px)"
+      $zIndex={1000}
+      $align="center"
+      $padding="xs"
+      $justify="center"
+      $css={css`
+        border: 1px solid #ccc;
+        overflow: hidden;
+        border-radius: var(--c--theme--spacings--3xs);
+        background: var(--c--theme--colors--greyscale-000);
+        ${isHover &&
+        css`
+          display: flex;
+          flex-direction: column;
+          justify-content: flex-start;
+          align-items: flex-start;
+          gap: var(--c--theme--spacings--2xs);
+        `}
+      `}
+    >
+      {!isHover && (
+        <BoxButton onClick={onOpen} $justify="center" $align="center">
+          <Icon iconName="list" $theme="primary" $variation="800" />
+        </BoxButton>
+      )}
+      {isHover && (
         <Box
-          $height="1px"
-          $width="auto"
-          $background="#e5e5e5"
-          $margin={{ vertical: 'small' }}
-          $css="flex: none;"
-        />
-        <BoxButton
-          onClick={() => {
-            editor.focus();
-            document.querySelector(`.bn-editor`)?.scrollIntoView({
-              behavior: 'smooth',
-              block: 'start',
-            });
-          }}
+          $width="100%"
+          $overflow="hidden"
+          $css={css`
+            user-select: none;
+          `}
         >
-          <Text $theme="primary" $padding={{ vertical: 'xtiny' }}>
-            {t('Back to top')}
-          </Text>
-        </BoxButton>
-        <BoxButton
-          onClick={() => {
-            editor.focus();
-            document
-              .querySelector(
-                `.bn-editor > .bn-block-group > .bn-block-outer:last-child`,
-              )
-              ?.scrollIntoView({
-                behavior: 'smooth',
-                block: 'start',
-              });
-          }}
-        >
-          <Text $theme="primary" $padding={{ vertical: 'xtiny' }}>
-            {t('Go to bottom')}
-          </Text>
-        </BoxButton>
-      </Box>
-    </Panel>
+          <Box
+            $margin={{ bottom: '10px' }}
+            $direction="row"
+            $justify="space-between"
+            $align="center"
+          >
+            <Text $weight="500" $size="sm" $variation="800" $theme="primary">
+              {t('Summary')}
+            </Text>
+            <BoxButton
+              onClick={onClose}
+              $justify="center"
+              $align="center"
+              $css={css`
+                transform: rotate(180deg);
+              `}
+            >
+              <Icon iconName="menu_open" $theme="primary" $variation="800" />
+            </BoxButton>
+          </Box>
+          <Box
+            $gap={spacing['3xs']}
+            $css={css`
+              overflow-y: auto;
+            `}
+          >
+            {headings?.map(
+              (heading) =>
+                heading.contentText && (
+                  <Heading
+                    editor={editor}
+                    headingId={heading.id}
+                    level={heading.props.level}
+                    text={heading.contentText}
+                    key={heading.id}
+                    isHighlight={headingIdHighlight === heading.id}
+                  />
+                ),
+            )}
+          </Box>
+        </Box>
+      )}
+    </Box>
   );
 };

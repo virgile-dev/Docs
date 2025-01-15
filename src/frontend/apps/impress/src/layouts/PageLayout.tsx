@@ -1,7 +1,7 @@
 import { PropsWithChildren } from 'react';
 
 import { Box } from '@/components';
-import { Footer } from '@/features/footer/Footer';
+import { Footer } from '@/features/footer';
 import { Header } from '@/features/header';
 
 export function PageLayout({ children }: PropsWithChildren) {

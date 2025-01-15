@@ -4,11 +4,18 @@ import mimetypes
 
 from django.conf import settings
 from django.db.models import Q
+from django.utils.functional import lazy
 from django.utils.translation import gettext_lazy as _
 
+import magic
 from rest_framework import exceptions, serializers
 
-from core import models
+from core import enums, models
+from core.services.ai_services import AI_ACTIONS
+from core.services.converter_services import (
+    ConversionError,
+    YdocConverter,
+)
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -16,8 +23,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = models.User
-        fields = ["id", "email"]
-        read_only_fields = ["id", "email"]
+        fields = ["id", "email", "full_name", "short_name"]
+        read_only_fields = ["id", "email", "full_name", "short_name"]
 
 
 class BaseAccessSerializer(serializers.ModelSerializer):
@@ -69,6 +76,7 @@ class BaseAccessSerializer(serializers.ModelSerializer):
             if not self.Meta.model.objects.filter(  # pylint: disable=no-member
                 Q(user=user) | Q(team__in=user.teams),
                 role__in=[models.RoleChoices.OWNER, models.RoleChoices.ADMIN],
+                **{self.Meta.resource_field_name: resource_id},  # pylint: disable=no-member
             ).exists():
                 raise exceptions.PermissionDenied(
                     "You are not allowed to manage accesses for this resource."
@@ -134,32 +142,69 @@ class BaseResourceSerializer(serializers.ModelSerializer):
         return {}
 
 
-class DocumentSerializer(BaseResourceSerializer):
-    """Serialize documents."""
+class ListDocumentSerializer(BaseResourceSerializer):
+    """Serialize documents with limited fields for display in lists."""
 
-    content = serializers.CharField(required=False)
-    accesses = DocumentAccessSerializer(many=True, read_only=True)
+    is_favorite = serializers.BooleanField(read_only=True)
+    nb_accesses = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = models.Document
         fields = [
             "id",
-            "content",
-            "title",
-            "accesses",
             "abilities",
+            "content",
+            "created_at",
+            "creator",
+            "is_favorite",
             "link_role",
             "link_reach",
-            "created_at",
+            "nb_accesses",
+            "title",
             "updated_at",
         ]
         read_only_fields = [
             "id",
-            "accesses",
             "abilities",
+            "created_at",
+            "creator",
+            "is_favorite",
             "link_role",
             "link_reach",
+            "nb_accesses",
+            "updated_at",
+        ]
+
+
+class DocumentSerializer(ListDocumentSerializer):
+    """Serialize documents with all fields for display in detail views."""
+
+    content = serializers.CharField(required=False)
+
+    class Meta:
+        model = models.Document
+        fields = [
+            "id",
+            "abilities",
+            "content",
             "created_at",
+            "creator",
+            "is_favorite",
+            "link_role",
+            "link_reach",
+            "nb_accesses",
+            "title",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "abilities",
+            "created_at",
+            "creator",
+            "is_favorite",
+            "link_role",
+            "link_reach",
+            "nb_accesses",
             "updated_at",
         ]
 
@@ -185,6 +230,104 @@ class DocumentSerializer(BaseResourceSerializer):
                 )
 
         return value
+
+
+class ServerCreateDocumentSerializer(serializers.Serializer):
+    """
+    Serializer for creating a document from a server-to-server request.
+
+    Expects 'content' as a markdown string, which is converted to our internal format
+    via a Node.js microservice. The conversion is handled automatically, so third parties
+    only need to provide markdown.
+
+    Both "sub" and "email" are required because the external app calling doesn't know
+    if the user will pre-exist in Docs database. If the user pre-exist, we will ignore the
+    submitted "email" field and use the email address set on the user account in our database
+    """
+
+    # Document
+    title = serializers.CharField(required=True)
+    content = serializers.CharField(required=True)
+    # User
+    sub = serializers.CharField(
+        required=True, validators=[models.User.sub_validator], max_length=255
+    )
+    email = serializers.EmailField(required=True)
+    language = serializers.ChoiceField(
+        required=False, choices=lazy(lambda: settings.LANGUAGES, tuple)()
+    )
+    # Invitation
+    message = serializers.CharField(required=False)
+    subject = serializers.CharField(required=False)
+
+    def create(self, validated_data):
+        """Create the document and associate it with the user or send an invitation."""
+        language = validated_data.get("language", settings.LANGUAGE_CODE)
+
+        # Get the user on its sub (unique identifier). Default on email if allowed in settings
+        email = validated_data["email"]
+
+        try:
+            user = models.User.objects.get_user_by_sub_or_email(
+                validated_data["sub"], email
+            )
+        except models.DuplicateEmailError as err:
+            raise serializers.ValidationError({"email": [err.message]}) from err
+
+        if user:
+            email = user.email
+            language = user.language or language
+
+        try:
+            document_content = YdocConverter().convert_markdown(
+                validated_data["content"]
+            )
+        except ConversionError as err:
+            raise serializers.ValidationError(
+                {"content": ["Could not convert content"]}
+            ) from err
+
+        document = models.Document.objects.create(
+            title=validated_data["title"],
+            content=document_content,
+            creator=user,
+        )
+
+        if user:
+            # Associate the document with the pre-existing user
+            models.DocumentAccess.objects.create(
+                document=document,
+                role=models.RoleChoices.OWNER,
+                user=user,
+            )
+        else:
+            # The user doesn't exist in our database: we need to invite him/her
+            models.Invitation.objects.create(
+                document=document,
+                email=email,
+                role=models.RoleChoices.OWNER,
+            )
+
+        self._send_email_notification(document, validated_data, email, language)
+        return document
+
+    def _send_email_notification(self, document, validated_data, email, language):
+        """Notify the user about the newly created document."""
+        subject = validated_data.get("subject") or _(
+            "A new document was created on your behalf!"
+        )
+        context = {
+            "message": validated_data.get("message")
+            or _("You have been granted ownership of a new document:"),
+            "title": subject,
+        }
+        document.send_email(subject, [email], context, language)
+
+    def update(self, instance, validated_data):
+        """
+        This serializer does not support updates.
+        """
+        raise NotImplementedError("Update is not supported for this serializer.")
 
 
 class LinkDocumentSerializer(BaseResourceSerializer):
@@ -218,15 +361,41 @@ class FileUploadSerializer(serializers.Serializer):
                 f"File size exceeds the maximum limit of {max_size:d} MB."
             )
 
-        # Validate file type
-        mime_type, _ = mimetypes.guess_type(file.name)
-        if mime_type not in settings.DOCUMENT_IMAGE_ALLOWED_MIME_TYPES:
-            mime_types = ", ".join(settings.DOCUMENT_IMAGE_ALLOWED_MIME_TYPES)
-            raise serializers.ValidationError(
-                f"File type '{mime_type:s}' is not allowed. Allowed types are: {mime_types:s}"
-            )
+        extension = file.name.rpartition(".")[-1] if "." in file.name else None
+
+        # Read the first few bytes to determine the MIME type accurately
+        mime = magic.Magic(mime=True)
+        magic_mime_type = mime.from_buffer(file.read(1024))
+        file.seek(0)  # Reset file pointer to the beginning after reading
+
+        self.context["is_unsafe"] = (
+            magic_mime_type in settings.DOCUMENT_UNSAFE_MIME_TYPES
+        )
+
+        extension_mime_type, _ = mimetypes.guess_type(file.name)
+
+        # Try guessing a coherent extension from the mimetype
+        if extension_mime_type != magic_mime_type:
+            self.context["is_unsafe"] = True
+
+        guessed_ext = mimetypes.guess_extension(magic_mime_type)
+        # Missing extensions or extensions longer than 5 characters (it's as long as an extension
+        # can be) are replaced by the extension we eventually guessed from mimetype.
+        if (extension is None or len(extension) > 5) and guessed_ext:
+            extension = guessed_ext[1:]
+
+        if extension is None:
+            raise serializers.ValidationError("Could not determine file extension.")
+
+        self.context["expected_extension"] = extension
 
         return file
+
+    def validate(self, attrs):
+        """Override validate to add the computed extension to validated_data."""
+        attrs["expected_extension"] = self.context["expected_extension"]
+        attrs["is_unsafe"] = self.context["is_unsafe"]
+        return attrs
 
 
 class TemplateSerializer(BaseResourceSerializer):
@@ -299,54 +468,72 @@ class InvitationSerializer(serializers.ModelSerializer):
         return {}
 
     def validate(self, attrs):
-        """Validate and restrict invitation to new user based on email."""
-
+        """Validate invitation data."""
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        role = attrs.get("role")
 
-        try:
-            document_id = self.context["resource_id"]
-        except KeyError as exc:
-            raise exceptions.ValidationError(
-                "You must set a document ID in kwargs to create a new document invitation."
-            ) from exc
+        attrs["document_id"] = self.context["resource_id"]
 
-        if not user and user.is_authenticated:
-            raise exceptions.PermissionDenied(
-                "Anonymous users are not allowed to create invitations."
-            )
+        # Only set the issuer if the instance is being created
+        if self.instance is None:
+            attrs["issuer"] = user
 
-        if not models.DocumentAccess.objects.filter(
-            Q(user=user) | Q(team__in=user.teams),
-            document=document_id,
-            role__in=[models.RoleChoices.OWNER, models.RoleChoices.ADMIN],
-        ).exists():
-            raise exceptions.PermissionDenied(
-                "You are not allowed to manage invitations for this document."
-            )
+        return attrs
 
-        if (
-            role == models.RoleChoices.OWNER
-            and not models.DocumentAccess.objects.filter(
+    def validate_role(self, role):
+        """Custom validation for the role field."""
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        document_id = self.context["resource_id"]
+
+        # If the role is OWNER, check if the user has OWNER access
+        if role == models.RoleChoices.OWNER:
+            if not models.DocumentAccess.objects.filter(
                 Q(user=user) | Q(team__in=user.teams),
                 document=document_id,
                 role=models.RoleChoices.OWNER,
-            ).exists()
-        ):
-            raise exceptions.PermissionDenied(
-                "Only owners of a document can invite other users as owners."
-            )
+            ).exists():
+                raise serializers.ValidationError(
+                    "Only owners of a document can invite other users as owners."
+                )
 
-        attrs["document_id"] = document_id
-        attrs["issuer"] = user
-        return attrs
+        return role
 
 
-class DocumentVersionSerializer(serializers.Serializer):
-    """Serialize Versions."""
+class VersionFilterSerializer(serializers.Serializer):
+    """Validate version filters applied to the list endpoint."""
 
-    etag = serializers.CharField()
-    is_latest = serializers.BooleanField()
-    last_modified = serializers.DateTimeField()
-    version_id = serializers.CharField()
+    version_id = serializers.CharField(required=False, allow_blank=True)
+    page_size = serializers.IntegerField(
+        required=False, min_value=1, max_value=50, default=20
+    )
+
+
+class AITransformSerializer(serializers.Serializer):
+    """Serializer for AI transform requests."""
+
+    action = serializers.ChoiceField(choices=AI_ACTIONS, required=True)
+    text = serializers.CharField(required=True)
+
+    def validate_text(self, value):
+        """Ensure the text field is not empty."""
+
+        if len(value.strip()) == 0:
+            raise serializers.ValidationError("Text field cannot be empty.")
+        return value
+
+
+class AITranslateSerializer(serializers.Serializer):
+    """Serializer for AI translate requests."""
+
+    language = serializers.ChoiceField(
+        choices=tuple(enums.ALL_LANGUAGES.items()), required=True
+    )
+    text = serializers.CharField(required=True)
+
+    def validate_text(self, value):
+        """Ensure the text field is not empty."""
+
+        if len(value.strip()) == 0:
+            raise serializers.ValidationError("Text field cannot be empty.")
+        return value

@@ -1,5 +1,4 @@
 import {
-  Alert,
   Button,
   Modal,
   ModalSize,
@@ -7,14 +6,12 @@ import {
   useToastProvider,
 } from '@openfun/cunningham-react';
 import { t } from 'i18next';
-import { useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
+import { useRouter } from 'next/router';
 
 import { Box, Text, TextErrors } from '@/components';
-import useCunninghamTheme from '@/cunningham/useCunninghamTheme';
 
 import { useRemoveDoc } from '../api/useRemoveDoc';
-import IconDoc from '../assets/icon-doc.svg';
-import IconRemove from '../assets/icon-trash.svg';
 import { Doc } from '../types';
 
 interface ModalRemoveDocProps {
@@ -23,12 +20,13 @@ interface ModalRemoveDocProps {
 }
 
 export const ModalRemoveDoc = ({ onClose, doc }: ModalRemoveDocProps) => {
-  const { colorsTokens } = useCunninghamTheme();
   const { toast } = useToastProvider();
-  const router = useRouter();
+  const { push } = useRouter();
+  const pathname = usePathname();
 
   const {
     mutate: removeDoc,
+
     isError,
     error,
   } = useRemoveDoc({
@@ -36,7 +34,11 @@ export const ModalRemoveDoc = ({ onClose, doc }: ModalRemoveDocProps) => {
       toast(t('The document has been deleted.'), VariantType.SUCCESS, {
         duration: 4000,
       });
-      router.push('/');
+      if (pathname === '/') {
+        onClose();
+      } else {
+        void push('/');
+      }
     },
   });
 
@@ -44,83 +46,48 @@ export const ModalRemoveDoc = ({ onClose, doc }: ModalRemoveDocProps) => {
     <Modal
       isOpen
       closeOnClickOutside
-      hideCloseButton
-      leftActions={
-        <Button
-          aria-label={t('Close the modal')}
-          color="secondary"
-          fullWidth
-          onClick={() => onClose()}
-        >
-          {t('Cancel')}
-        </Button>
-      }
       onClose={() => onClose()}
       rightActions={
-        <Button
-          aria-label={t('Confirm deletion')}
-          color="primary"
-          fullWidth
-          onClick={() =>
-            removeDoc({
-              docId: doc.id,
-            })
-          }
-        >
-          {t('Confirm deletion')}
-        </Button>
+        <>
+          <Button
+            aria-label={t('Close the modal')}
+            color="secondary"
+            fullWidth
+            onClick={() => onClose()}
+          >
+            {t('Cancel')}
+          </Button>
+          <Button
+            aria-label={t('Confirm deletion')}
+            color="danger"
+            fullWidth
+            onClick={() =>
+              removeDoc({
+                docId: doc.id,
+              })
+            }
+          >
+            {t('Delete')}
+          </Button>
+        </>
       }
       size={ModalSize.MEDIUM}
       title={
-        <Box $align="center" $gap="1rem">
-          <IconRemove width={48} color={colorsTokens()['primary-text']} />
-          <Text as="h2" $size="h3" $margin="none">
-            {t('Deleting the document "{{title}}"', { title: doc.title })}
-          </Text>
-        </Box>
+        <Text $size="h6" as="h6" $margin={{ all: '0' }} $align="flex-start">
+          {t('Delete a doc')}
+        </Text>
       }
     >
-      <Box
-        $margin={{ bottom: 'xl' }}
-        aria-label={t('Content modal to delete document')}
-      >
+      <Box aria-label={t('Content modal to delete document')}>
         {!isError && (
-          <Alert canClose={false} type={VariantType.WARNING}>
-            <Text>
-              {t('Are you sure you want to delete the document "{{title}}"?', {
-                title: doc.title,
-              })}
-            </Text>
-          </Alert>
+          <Text $size="sm" $variation="600">
+            {t('Are you sure you want to delete the document "{{title}}"?', {
+              title: doc.title,
+            })}
+          </Text>
         )}
 
         {isError && <TextErrors causes={error.cause} />}
-
-        <Text
-          as="p"
-          $padding="small"
-          $direction="row"
-          $gap="0.5rem"
-          $background={colorsTokens()['primary-150']}
-          $theme="primary"
-          $align="center"
-          $radius="2px"
-        >
-          <IconDoc
-            className="p-t"
-            aria-label={t(`Document icon`)}
-            color={colorsTokens()['primary-500']}
-            width={58}
-            style={{
-              borderRadius: '8px',
-              backgroundColor: '#ffffff',
-              border: `1px solid ${colorsTokens()['primary-300']}`,
-            }}
-          />
-          <Text $theme="primary" $weight="bold" $size="l">
-            {doc.title}
-          </Text>
-        </Text>
       </Box>
     </Modal>
   );

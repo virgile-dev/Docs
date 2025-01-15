@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
-import { baseApiUrl } from '@/core/conf';
+import { baseApiUrl } from '@/api';
+import { terminateCrispSession } from '@/services';
 
 import { User, getMe } from './api';
 import { PATH_AUTH_LOCAL_STORAGE } from './conf';
@@ -11,6 +12,8 @@ interface AuthStore {
   initAuth: () => void;
   logout: () => void;
   login: () => void;
+  setAuthUrl: (url: string) => void;
+  getAuthUrl: () => string | undefined;
   userData?: User;
 }
 
@@ -20,22 +23,13 @@ const initialState = {
   userData: undefined,
 };
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   initiated: initialState.initiated,
   authenticated: initialState.authenticated,
   userData: initialState.userData,
-
   initAuth: () => {
     getMe()
       .then((data: User) => {
-        // If a path is stored in the local storage, we redirect to it
-        const path_auth = localStorage.getItem(PATH_AUTH_LOCAL_STORAGE);
-        if (path_auth) {
-          localStorage.removeItem(PATH_AUTH_LOCAL_STORAGE);
-          window.location.replace(path_auth);
-          return;
-        }
-
         set({ authenticated: true, userData: data });
       })
       .catch(() => {})
@@ -44,15 +38,27 @@ export const useAuthStore = create<AuthStore>((set) => ({
       });
   },
   login: () => {
-    // If we try to access a specific page and we are not authenticated
-    // we store the path in the local storage to redirect to it after login
-    if (window.location.pathname !== '/') {
-      localStorage.setItem(PATH_AUTH_LOCAL_STORAGE, window.location.pathname);
-    }
+    get().setAuthUrl(window.location.pathname);
 
     window.location.replace(`${baseApiUrl()}authenticate/`);
   },
   logout: () => {
+    terminateCrispSession();
     window.location.replace(`${baseApiUrl()}logout/`);
+  },
+  // If we try to access a specific page and we are not authenticated
+  // we store the path in the local storage to redirect to it after login
+  setAuthUrl() {
+    if (window.location.pathname !== '/') {
+      localStorage.setItem(PATH_AUTH_LOCAL_STORAGE, window.location.pathname);
+    }
+  },
+  // If a path is stored in the local storage, we return it then remove it
+  getAuthUrl() {
+    const path_auth = localStorage.getItem(PATH_AUTH_LOCAL_STORAGE);
+    if (path_auth) {
+      localStorage.removeItem(PATH_AUTH_LOCAL_STORAGE);
+      return path_auth;
+    }
   },
 }));

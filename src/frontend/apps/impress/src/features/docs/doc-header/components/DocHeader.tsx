@@ -1,123 +1,105 @@
-import { Button } from '@openfun/cunningham-react';
-import React, { Fragment, useState } from 'react';
+import { DateTime } from 'luxon';
 import { useTranslation } from 'react-i18next';
+import { css } from 'styled-components';
 
-import { Box, Card, StyledLink, Text } from '@/components';
+import { Box, HorizontalSeparator, Icon, Text } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
 import {
   Doc,
-  Role,
+  LinkReach,
   currentDocRole,
-  useTransRole,
+  useTrans,
 } from '@/features/docs/doc-management';
-import { ModalVersion, Versions } from '@/features/docs/doc-versioning';
-import { useDate } from '@/hook';
+import { useResponsiveStore } from '@/stores';
 
-import { DocTagPublic } from './DocTagPublic';
+import { DocTitle } from './DocTitle';
 import { DocToolBox } from './DocToolBox';
 
 interface DocHeaderProps {
   doc: Doc;
-  versionId?: Versions['version_id'];
 }
 
-export const DocHeader = ({ doc, versionId }: DocHeaderProps) => {
-  const { colorsTokens } = useCunninghamTheme();
+export const DocHeader = ({ doc }: DocHeaderProps) => {
+  const { colorsTokens, spacingsTokens } = useCunninghamTheme();
+  const { isDesktop } = useResponsiveStore();
+  const spacings = spacingsTokens();
+  const colors = colorsTokens();
+
   const { t } = useTranslation();
-  const { formatDate } = useDate();
-  const transRole = useTransRole();
-  const [isModalVersionOpen, setIsModalVersionOpen] = useState(false);
+  const docIsPublic = doc.link_reach === LinkReach.PUBLIC;
+
+  const { transRole } = useTrans();
 
   return (
     <>
-      <Card
-        $margin="small"
+      <Box
+        $width="100%"
+        $padding={{ top: isDesktop ? '4xl' : 'md' }}
+        $gap={spacings['base']}
         aria-label={t('It is the card information about the document.')}
       >
-        <Box $padding="small" $direction="row" $align="center">
-          <StyledLink href="/">
-            <Text
-              $isMaterialIcon
-              $theme="primary"
-              $size="2rem"
-              $css={`&:hover {background-color: ${colorsTokens()['primary-100']}; };`}
-              $hasTransition
-              $radius="5px"
-              $padding="tiny"
-            >
-              home
-            </Text>
-          </StyledLink>
+        {docIsPublic && (
           <Box
-            $width="1px"
-            $height="70%"
-            $background={colorsTokens()['greyscale-100']}
-            $margin={{ horizontal: 'small' }}
-          />
-          <Box $gap="1rem" $direction="row">
-            <Text
-              as="h2"
-              $align="center"
-              $margin={{ all: 'none', left: 'tiny' }}
-            >
-              {doc.title}
-            </Text>
-            {versionId && (
-              <Button
-                onClick={() => {
-                  setIsModalVersionOpen(true);
-                }}
-                size="small"
-              >
-                {t('Restore this version')}
-              </Button>
-            )}
-          </Box>
-          <DocToolBox doc={doc} />
-        </Box>
-        <Box
-          $direction="row"
-          $align="center"
-          $css="border-top:1px solid #eee"
-          $padding={{ horizontal: 'big', vertical: 'tiny' }}
-          $gap="0.5rem 2rem"
-          $justify="space-between"
-          $wrap="wrap"
-        >
-          <Box $direction="row" $align="center" $gap="0.5rem 2rem" $wrap="wrap">
-            <DocTagPublic doc={doc} />
-            <Text $size="s" $display="inline">
-              {t('Created at')} <strong>{formatDate(doc.created_at)}</strong>
-            </Text>
-            <Text $size="s" $display="inline" $elipsis $maxWidth="60vw">
-              {t('Owners:')}{' '}
-              <strong>
-                {doc.accesses
-                  .filter(
-                    (access) => access.role === Role.OWNER && access.user.email,
-                  )
-                  .map((access, index, accesses) => (
-                    <Fragment key={`access-${index}`}>
-                      {access.user.email}{' '}
-                      {index < accesses.length - 1 ? ' / ' : ''}
-                    </Fragment>
-                  ))}
-              </strong>
+            aria-label={t('Public document')}
+            $color={colors['primary-800']}
+            $background={colors['primary-100']}
+            $radius={spacings['3xs']}
+            $direction="row"
+            $padding="xs"
+            $flex={1}
+            $align="center"
+            $gap={spacings['3xs']}
+            $css={css`
+              border: 1px solid var(--c--theme--colors--primary-300, #e3e3fd);
+            `}
+          >
+            <Icon
+              $theme="primary"
+              $variation="800"
+              data-testid="public-icon"
+              iconName="public"
+            />
+            <Text $theme="primary" $variation="800">
+              {t('Public document')}
             </Text>
           </Box>
-          <Text $size="s" $display="inline">
-            {t('Your role:')}{' '}
-            <strong>{transRole(currentDocRole(doc.abilities))}</strong>
-          </Text>
+        )}
+        <Box $direction="row" $align="center" $width="100%">
+          <Box
+            $direction="row"
+            $justify="space-between"
+            $css="flex:1;"
+            $gap="0.5rem 1rem"
+            $align="center"
+          >
+            <Box $gap={spacings['3xs']}>
+              <DocTitle doc={doc} />
+
+              <Box $direction="row">
+                {isDesktop && (
+                  <>
+                    <Text $variation="600" $size="s" $weight="bold">
+                      {transRole(currentDocRole(doc.abilities))}&nbsp;·&nbsp;
+                    </Text>
+                    <Text $variation="600" $size="s">
+                      {t('Last update: {{update}}', {
+                        update: DateTime.fromISO(doc.updated_at).toRelative(),
+                      })}
+                    </Text>
+                  </>
+                )}
+                {!isDesktop && (
+                  <Text $variation="400" $size="s">
+                    {DateTime.fromISO(doc.updated_at).toRelative()}
+                  </Text>
+                )}
+              </Box>
+            </Box>
+            <DocToolBox doc={doc} />
+          </Box>
         </Box>
-      </Card>
-      {isModalVersionOpen && versionId && (
-        <ModalVersion
-          onClose={() => setIsModalVersionOpen(false)}
-          docId={doc.id}
-          versionId={versionId}
-        />
-      )}
+        <HorizontalSeparator $withPadding={true} />
+      </Box>
     </>
   );
 };

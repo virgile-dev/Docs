@@ -1,5 +1,8 @@
 """Authentication Backends for the Impress core app."""
 
+import logging
+
+from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
 from django.utils.translation import gettext_lazy as _
 
@@ -8,7 +11,9 @@ from mozilla_django_oidc.auth import (
     OIDCAuthenticationBackend as MozillaOIDCAuthenticationBackend,
 )
 
-from core.models import User
+from core.models import DuplicateEmailError, User
+
+logger = logging.getLogger(__name__)
 
 
 class OIDCAuthenticationBackend(MozillaOIDCAuthenticationBackend):
@@ -58,53 +63,68 @@ class OIDCAuthenticationBackend(MozillaOIDCAuthenticationBackend):
 
         return userinfo
 
-    def get_or_create_user(self, access_token, id_token, payload):
-        """Return a User based on userinfo. Get or create a new user if no user matches the Sub.
-
-        Parameters:
-        - access_token (str): The access token.
-        - id_token (str): The ID token.
-        - payload (dict): The user payload.
-
-        Returns:
-        - User: An existing or newly created User instance.
-
-        Raises:
-        - Exception: Raised when user creation is not allowed and no existing user is found.
+    def verify_claims(self, claims):
         """
+        Verify the presence of essential claims and the "sub" (which is mandatory as defined
+        by the OIDC specification) to decide if authentication should be allowed.
+        """
+        essential_claims = settings.USER_OIDC_ESSENTIAL_CLAIMS
+        missing_claims = [claim for claim in essential_claims if claim not in claims]
+
+        if missing_claims:
+            logger.error("Missing essential claims: %s", missing_claims)
+            return False
+
+        return True
+
+    def get_or_create_user(self, access_token, id_token, payload):
+        """Return a User based on userinfo. Create a new user if no match is found."""
 
         user_info = self.get_userinfo(access_token, id_token, payload)
-        sub = user_info.get("sub")
 
-        if sub is None:
-            raise SuspiciousOperation(
-                _("User info contained no recognizable user identification")
-            )
+        if not self.verify_claims(user_info):
+            raise SuspiciousOperation("Claims verification failed.")
+
+        sub = user_info["sub"]
+        email = user_info.get("email")
+
+        # Get user's full name from OIDC fields defined in settings
+        full_name = self.compute_full_name(user_info)
+        short_name = user_info.get(settings.USER_OIDC_FIELD_TO_SHORTNAME)
+
+        claims = {
+            "email": email,
+            "full_name": full_name,
+            "short_name": short_name,
+        }
 
         try:
-            user = User.objects.get(sub=sub)
-        except User.DoesNotExist:
-            if self.get_settings("OIDC_CREATE_USER", True):
-                user = self.create_user(user_info)
-            else:
-                user = None
+            user = User.objects.get_user_by_sub_or_email(sub, email)
+        except DuplicateEmailError as err:
+            raise SuspiciousOperation(err.message) from err
+
+        if user:
+            if not user.is_active:
+                raise SuspiciousOperation(_("User account is disabled"))
+            self.update_user_if_needed(user, claims)
+        elif self.get_settings("OIDC_CREATE_USER", True):
+            user = User.objects.create(sub=sub, password="!", **claims)  # noqa: S106
 
         return user
 
-    def create_user(self, claims):
-        """Return a newly created User instance."""
-
-        sub = claims.get("sub")
-
-        if sub is None:
-            raise SuspiciousOperation(
-                _("Claims contained no recognizable user identification")
-            )
-
-        user = User.objects.create(
-            sub=sub,
-            email=claims.get("email"),
-            password="!",  # noqa: S106
+    def compute_full_name(self, user_info):
+        """Compute user's full name based on OIDC fields in settings."""
+        name_fields = settings.USER_OIDC_FIELDS_TO_FULLNAME
+        full_name = " ".join(
+            user_info[field] for field in name_fields if user_info.get(field)
         )
+        return full_name or None
 
-        return user
+    def update_user_if_needed(self, user, claims):
+        """Update user claims if they have changed."""
+        has_changed = any(
+            value and value != getattr(user, key) for key, value in claims.items()
+        )
+        if has_changed:
+            updated_claims = {key: value for key, value in claims.items() if value}
+            self.UserModel.objects.filter(id=user.id).update(**updated_claims)

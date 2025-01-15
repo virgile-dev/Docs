@@ -1,21 +1,20 @@
 import { Select } from '@openfun/cunningham-react';
-import Image from 'next/image';
+import { Settings } from 'luxon';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import styled from 'styled-components';
 
 import { Box, Text } from '@/components/';
-
-import IconLanguage from './assets/icon-language.svg?url';
+import { LANGUAGES_ALLOWED } from '@/i18n/conf';
 
 const SelectStyled = styled(Select)<{ $isSmall?: boolean }>`
   flex-shrink: 0;
-  width: 5.5rem;
+  width: auto;
 
   .c__select__wrapper {
     min-height: 2rem;
     height: auto;
-    border-color: #ddd;
+    border-color: transparent;
     padding: 0 0.15rem 0 0.45rem;
     border-radius: 1px;
 
@@ -28,7 +27,7 @@ const SelectStyled = styled(Select)<{ $isSmall?: boolean }>`
     }
 
     &:hover {
-      border-color: var(--c--theme--colors--primary-500);
+      box-shadow: none !important;
     }
   }
 `;
@@ -36,6 +35,7 @@ const SelectStyled = styled(Select)<{ $isSmall?: boolean }>`
 export const LanguagePicker = () => {
   const { t, i18n } = useTranslation();
   const { preload: languages } = i18n.options;
+  Settings.defaultLocale = i18n.language;
 
   const optionsPicker = useMemo(() => {
     return (languages || []).map((lang) => ({
@@ -48,12 +48,22 @@ export const LanguagePicker = () => {
           $gap="0.7rem"
           $align="center"
         >
-          <Image priority src={IconLanguage} alt={t('Language Icon')} />
-          <Text $theme="primary">{lang.toUpperCase()}</Text>
+          <Text
+            $isMaterialIcon
+            $size="1rem"
+            $theme="primary"
+            $weight="bold"
+            $variation="800"
+          >
+            translate
+          </Text>
+          <Text $theme="primary" $weight="500" $variation="800">
+            {LANGUAGES_ALLOWED[lang]}
+          </Text>
         </Box>
       ),
     }));
-  }, [languages, t]);
+  }, [languages]);
 
   return (
     <SelectStyled

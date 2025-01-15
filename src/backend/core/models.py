@@ -1,8 +1,10 @@
 """
 Declare and configure the models for the impress core application
 """
+# pylint: disable=too-many-lines
 
 import hashlib
+import smtplib
 import tempfile
 import textwrap
 import uuid
@@ -13,15 +15,19 @@ from logging import getLogger
 from django.conf import settings
 from django.contrib.auth import models as auth_models
 from django.contrib.auth.base_user import AbstractBaseUser
+from django.contrib.sites.models import Site
 from django.core import exceptions, mail, validators
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.core.mail import send_mail
 from django.db import models
 from django.http import FileResponse
 from django.template.base import Template as DjangoTemplate
 from django.template.context import Context
+from django.template.loader import render_to_string
 from django.utils import html, timezone
 from django.utils.functional import cached_property, lazy
+from django.utils.translation import get_language, override
 from django.utils.translation import gettext_lazy as _
 
 import frontmatter
@@ -67,6 +73,9 @@ class RoleChoices(models.TextChoices):
     OWNER = "owner", _("Owner")
 
 
+PRIVILEGED_ROLES = [RoleChoices.ADMIN, RoleChoices.OWNER]
+
+
 class LinkReachChoices(models.TextChoices):
     """Defines types of access for links"""
 
@@ -79,6 +88,16 @@ class LinkReachChoices(models.TextChoices):
         _("Authenticated"),
     )  # Any authenticated user can access the document
     PUBLIC = "public", _("Public")  # Even anonymous users can access the document
+
+
+class DuplicateEmailError(Exception):
+    """Raised when an email is already associated with a pre-existing user."""
+
+    def __init__(self, message=None, email=None):
+        """Set message and email to describe the exception."""
+        self.message = message
+        self.email = email
+        super().__init__(self.message)
 
 
 class BaseModel(models.Model):
@@ -118,21 +137,50 @@ class BaseModel(models.Model):
         super().save(*args, **kwargs)
 
 
+class UserManager(auth_models.UserManager):
+    """Custom manager for User model with additional methods."""
+
+    def get_user_by_sub_or_email(self, sub, email):
+        """Fetch existing user by sub or email."""
+        try:
+            return self.get(sub=sub)
+        except self.model.DoesNotExist as err:
+            if not email:
+                return None
+
+            if settings.OIDC_FALLBACK_TO_EMAIL_FOR_IDENTIFICATION:
+                try:
+                    return self.get(email=email)
+                except self.model.DoesNotExist:
+                    pass
+            elif (
+                self.filter(email=email).exists()
+                and not settings.OIDC_ALLOW_DUPLICATE_EMAILS
+            ):
+                raise DuplicateEmailError(
+                    _(
+                        "We couldn't find a user with this sub but the email is already "
+                        "associated with a registered user."
+                    )
+                ) from err
+        return None
+
+
 class User(AbstractBaseUser, BaseModel, auth_models.PermissionsMixin):
     """User model to work with OIDC only authentication."""
 
     sub_validator = validators.RegexValidator(
-        regex=r"^[\w.@+-]+\Z",
+        regex=r"^[\w.@+-:]+\Z",
         message=_(
             "Enter a valid sub. This value may contain only letters, "
-            "numbers, and @/./+/-/_ characters."
+            "numbers, and @/./+/-/_/: characters."
         ),
     )
 
     sub = models.CharField(
         _("sub"),
         help_text=_(
-            "Required. 255 characters or fewer. Letters, numbers, and @/./+/-/_ characters only."
+            "Required. 255 characters or fewer. Letters, numbers, and @/./+/-/_/: characters only."
         ),
         max_length=255,
         unique=True,
@@ -140,6 +188,10 @@ class User(AbstractBaseUser, BaseModel, auth_models.PermissionsMixin):
         blank=True,
         null=True,
     )
+
+    full_name = models.CharField(_("full name"), max_length=100, null=True, blank=True)
+    short_name = models.CharField(_("short name"), max_length=20, null=True, blank=True)
+
     email = models.EmailField(_("identity email address"), blank=True, null=True)
 
     # Unlike the "email" field which stores the email coming from the OIDC token, this field
@@ -180,7 +232,7 @@ class User(AbstractBaseUser, BaseModel, auth_models.PermissionsMixin):
         ),
     )
 
-    objects = auth_models.UserManager()
+    objects = UserManager()
 
     USERNAME_FIELD = "admin_email"
     REQUIRED_FIELDS = []
@@ -227,6 +279,13 @@ class User(AbstractBaseUser, BaseModel, auth_models.PermissionsMixin):
                 for invitation in valid_invitations
             ]
         )
+
+        # Set creator of documents if not yet set (e.g. documents created via server-to-server API)
+        document_ids = [invitation.document_id for invitation in valid_invitations]
+        Document.objects.filter(id__in=document_ids, creator__isnull=True).update(
+            creator=self
+        )
+
         valid_invitations.delete()
 
     def email_user(self, subject, message, from_email=None, **kwargs):
@@ -324,10 +383,17 @@ class Document(BaseModel):
     link_reach = models.CharField(
         max_length=20,
         choices=LinkReachChoices.choices,
-        default=LinkReachChoices.AUTHENTICATED,
+        default=LinkReachChoices.RESTRICTED,
     )
     link_role = models.CharField(
         max_length=20, choices=LinkRoleChoices.choices, default=LinkRoleChoices.READER
+    )
+    creator = models.ForeignKey(
+        User,
+        on_delete=models.RESTRICT,
+        related_name="documents_created",
+        blank=True,
+        null=True,
     )
 
     _content = None
@@ -411,73 +477,62 @@ class Document(BaseModel):
             Bucket=default_storage.bucket_name, Key=self.file_key, VersionId=version_id
         )
 
-    def get_versions_slice(
-        self, from_version_id="", from_datetime=None, page_size=None
-    ):
+    def get_versions_slice(self, from_version_id="", min_datetime=None, page_size=None):
         """Get document versions from object storage with pagination and starting conditions"""
         # /!\ Trick here /!\
         # The "KeyMarker" and "VersionIdMarker" fields must either be both set or both not set.
         # The error we get otherwise is not helpful at all.
-        token = {}
+        markers = {}
         if from_version_id:
-            token.update(
+            markers.update(
                 {"KeyMarker": self.file_key, "VersionIdMarker": from_version_id}
             )
 
-        if from_datetime:
-            response = default_storage.connection.meta.client.list_object_versions(
-                Bucket=default_storage.bucket_name,
-                Prefix=self.file_key,
-                MaxKeys=settings.DOCUMENT_VERSIONS_PAGE_SIZE,
-                **token,
-            )
-
-            # Find the first version after the given datetime
-            version = None
-            for version in response.get("Versions", []):
-                if version["LastModified"] >= from_datetime:
-                    token = {
-                        "KeyMarker": self.file_key,
-                        "VersionIdMarker": version["VersionId"],
-                    }
-                    break
-            else:
-                if version is None or version["LastModified"] < from_datetime:
-                    if response["NextVersionIdMarker"]:
-                        return self.get_versions_slice(
-                            from_version_id=response["NextVersionIdMarker"],
-                            page_size=settings.DOCUMENT_VERSIONS_PAGE_SIZE,
-                            from_datetime=from_datetime,
-                        )
-                    return {
-                        "next_version_id_marker": "",
-                        "is_truncated": False,
-                        "versions": [],
-                    }
+        real_page_size = (
+            min(page_size, settings.DOCUMENT_VERSIONS_PAGE_SIZE)
+            if page_size
+            else settings.DOCUMENT_VERSIONS_PAGE_SIZE
+        )
 
         response = default_storage.connection.meta.client.list_object_versions(
             Bucket=default_storage.bucket_name,
             Prefix=self.file_key,
-            MaxKeys=min(page_size, settings.DOCUMENT_VERSIONS_PAGE_SIZE)
-            if page_size
-            else settings.DOCUMENT_VERSIONS_PAGE_SIZE,
-            **token,
+            # compensate the latest version that we exclude below and get one more to
+            # know if there are more pages
+            MaxKeys=real_page_size + 2,
+            **markers,
         )
+
+        min_last_modified = min_datetime or self.created_at
+        versions = [
+            {
+                key_snake: version[key_camel]
+                for key_snake, key_camel in [
+                    ("etag", "ETag"),
+                    ("is_latest", "IsLatest"),
+                    ("last_modified", "LastModified"),
+                    ("version_id", "VersionId"),
+                ]
+            }
+            for version in response.get("Versions", [])
+            if version["LastModified"] >= min_last_modified
+            and version["IsLatest"] is False
+        ]
+        results = versions[:real_page_size]
+
+        count = len(results)
+        if count == len(versions):
+            is_truncated = False
+            next_version_id_marker = ""
+        else:
+            is_truncated = True
+            next_version_id_marker = versions[count - 1]["version_id"]
+
         return {
-            "next_version_id_marker": response["NextVersionIdMarker"],
-            "is_truncated": response["IsTruncated"],
-            "versions": [
-                {
-                    key_snake: version[key_camel]
-                    for key_camel, key_snake in [
-                        ("ETag", "etag"),
-                        ("IsLatest", "is_latest"),
-                        ("LastModified", "last_modified"),
-                        ("VersionId", "version_id"),
-                    ]
-                }
-                for version in response.get("Versions", [])
-            ],
+            "next_version_id_marker": next_version_id_marker,
+            "is_truncated": is_truncated,
+            "versions": results,
+            "count": count,
         }
 
     def delete_version(self, version_id):
@@ -495,7 +550,8 @@ class Document(BaseModel):
         # Compute version roles before adding link roles because we don't
         # want anonymous users to access versions (we wouldn't know from
         # which date to allow them anyway)
-        can_get_versions = bool(roles)
+        # Anonymous users should also not see document accesses
+        has_role = bool(roles)
 
         # Add role provided by the document link
         if self.link_reach == LinkReachChoices.PUBLIC or (
@@ -506,21 +562,86 @@ class Document(BaseModel):
         is_owner_or_admin = bool(
             roles.intersection({RoleChoices.OWNER, RoleChoices.ADMIN})
         )
-        is_editor = bool(RoleChoices.EDITOR in roles)
         can_get = bool(roles)
+        can_update = is_owner_or_admin or RoleChoices.EDITOR in roles
 
         return {
-            "attachment_upload": is_owner_or_admin or is_editor,
+            "accesses_manage": is_owner_or_admin,
+            "accesses_view": has_role,
+            "ai_transform": can_update,
+            "ai_translate": can_update,
+            "attachment_upload": can_update,
+            "collaboration_auth": can_get,
             "destroy": RoleChoices.OWNER in roles,
+            "favorite": can_get and user.is_authenticated,
             "link_configuration": is_owner_or_admin,
-            "manage_accesses": is_owner_or_admin,
-            "partial_update": is_owner_or_admin or is_editor,
+            "invite_owner": RoleChoices.OWNER in roles,
+            "partial_update": can_update,
             "retrieve": can_get,
-            "update": is_owner_or_admin or is_editor,
+            "media_auth": can_get,
+            "update": can_update,
             "versions_destroy": is_owner_or_admin,
-            "versions_list": can_get_versions,
-            "versions_retrieve": can_get_versions,
+            "versions_list": has_role,
+            "versions_retrieve": has_role,
         }
+
+    def send_email(self, subject, emails, context=None, language=None):
+        """Generate and send email from a template."""
+        context = context or {}
+        domain = Site.objects.get_current().domain
+        language = language or get_language()
+        context.update(
+            {
+                "brandname": settings.EMAIL_BRAND_NAME,
+                "document": self,
+                "domain": domain,
+                "link": f"{domain}/docs/{self.id}/",
+                "logo_img": settings.EMAIL_LOGO_IMG,
+            }
+        )
+
+        with override(language):
+            msg_html = render_to_string("mail/html/invitation.html", context)
+            msg_plain = render_to_string("mail/text/invitation.txt", context)
+            subject = str(subject)  # Force translation
+
+            try:
+                send_mail(
+                    subject.capitalize(),
+                    msg_plain,
+                    settings.EMAIL_FROM,
+                    emails,
+                    html_message=msg_html,
+                    fail_silently=False,
+                )
+            except smtplib.SMTPException as exception:
+                logger.error("invitation to %s was not sent: %s", emails, exception)
+
+    def send_invitation_email(self, email, role, sender, language=None):
+        """Method allowing a user to send an email invitation to another user for a document."""
+        language = language or get_language()
+        role = RoleChoices(role).label
+        sender_name = sender.full_name or sender.email
+        sender_name_email = (
+            f"{sender.full_name:s} ({sender.email})"
+            if sender.full_name
+            else sender.email
+        )
+
+        with override(language):
+            context = {
+                "title": _("{name} shared a document with you!").format(
+                    name=sender_name
+                ),
+                "message": _(
+                    '{name} invited you with the role "{role}" on the following document:'
+                ).format(name=sender_name_email, role=role.lower()),
+            }
+            subject = _("{name} shared a document with you: {title}").format(
+                name=sender_name, title=self.title
+            )
+
+        self.send_email(subject, [email], context, language)
 
 
 class LinkTrace(BaseModel):
@@ -553,6 +674,37 @@ class LinkTrace(BaseModel):
 
     def __str__(self):
         return f"{self.user!s} trace on document {self.document!s}"
+
+
+class DocumentFavorite(BaseModel):
+    """Relation model to store a user's favorite documents."""
+
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="favorited_by_users",
+    )
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="favorite_documents"
+    )
+
+    class Meta:
+        db_table = "impress_document_favorite"
+        verbose_name = _("Document favorite")
+        verbose_name_plural = _("Document favorites")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "document"],
+                name="unique_document_favorite_user",
+                violation_error_message=_(
+                    "This document is already targeted by a favorite relation instance "
+                    "for the same user."
+                ),
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user!s} favorite on document {self.document!s}"
 
 
 class DocumentAccess(BaseAccess):
@@ -630,15 +782,15 @@ class Template(BaseModel):
         is_owner_or_admin = bool(
             set(roles).intersection({RoleChoices.OWNER, RoleChoices.ADMIN})
         )
-        is_editor = bool(RoleChoices.EDITOR in roles)
         can_get = self.is_public or bool(roles)
+        can_update = is_owner_or_admin or RoleChoices.EDITOR in roles
 
         return {
             "destroy": RoleChoices.OWNER in roles,
             "generate_document": can_get,
-            "manage_accesses": is_owner_or_admin,
-            "update": is_owner_or_admin or is_editor,
-            "partial_update": is_owner_or_admin or is_editor,
+            "accesses_manage": is_owner_or_admin,
+            "update": can_update,
+            "partial_update": can_update,
             "retrieve": can_get,
         }
 
@@ -805,6 +957,8 @@ class Invitation(BaseModel):
         User,
         on_delete=models.CASCADE,
         related_name="invitations",
+        blank=True,
+        null=True,
     )
 
     class Meta:
@@ -825,7 +979,10 @@ class Invitation(BaseModel):
         super().clean()
 
         # Check if an identity already exists for the provided email
-        if User.objects.filter(email=self.email).exists():
+        if (
+            User.objects.filter(email=self.email).exists()
+            and not settings.OIDC_ALLOW_DUPLICATE_EMAILS
+        ):
             raise exceptions.ValidationError(
                 {"email": _("This email is already associated to a registered user.")}
             )
@@ -841,8 +998,6 @@ class Invitation(BaseModel):
 
     def get_abilities(self, user):
         """Compute and return abilities for a given user."""
-        can_delete = False
-        can_update = False
         roles = []
 
         if user.is_authenticated:
@@ -857,17 +1012,13 @@ class Invitation(BaseModel):
                 except (self._meta.model.DoesNotExist, IndexError):
                     roles = []
 
-            can_delete = bool(
-                set(roles).intersection({RoleChoices.OWNER, RoleChoices.ADMIN})
-            )
-
-            can_update = bool(
-                set(roles).intersection({RoleChoices.OWNER, RoleChoices.ADMIN})
-            )
+        is_admin_or_owner = bool(
+            set(roles).intersection({RoleChoices.OWNER, RoleChoices.ADMIN})
+        )
 
         return {
-            "destroy": can_delete,
-            "update": can_update,
-            "partial_update": can_update,
-            "retrieve": bool(roles),
+            "destroy": is_admin_or_owner,
+            "update": is_admin_or_owner,
+            "partial_update": is_admin_or_owner,
+            "retrieve": is_admin_or_owner,
         }

@@ -1,17 +1,33 @@
 import { expect, test } from '@playwright/test';
 
-import { keyCloakSignIn } from './common';
+import { keyCloakSignIn, mockedDocument } from './common';
 
 test.describe('Doc Routing', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
   });
 
+  test('Check the presence of the meta tag noindex', async ({ page }) => {
+    const buttonCreateHomepage = page.getByRole('button', {
+      name: 'New doc',
+    });
+
+    await expect(buttonCreateHomepage).toBeVisible();
+    await buttonCreateHomepage.click();
+    await expect(
+      page.getByRole('button', {
+        name: 'Share',
+      }),
+    ).toBeVisible();
+    const metaDescription = page.locator('meta[name="robots"]');
+    await expect(metaDescription).toHaveAttribute('content', 'noindex');
+  });
+
   test('checks alias docs url with homepage', async ({ page }) => {
     await expect(page).toHaveURL('/');
 
     const buttonCreateHomepage = page.getByRole('button', {
-      name: 'Create a new document',
+      name: 'New doc',
     });
 
     await expect(buttonCreateHomepage).toBeVisible();
@@ -43,9 +59,12 @@ test.describe('Doc Routing: Not loggued', () => {
     page,
     browserName,
   }) => {
+    await mockedDocument(page, { link_reach: 'public' });
     await page.goto('/docs/mocked-document-id/');
+    await expect(page.locator('h2').getByText('Mocked document')).toBeVisible();
+    await page.getByRole('button', { name: 'Login' }).click();
     await keyCloakSignIn(page, browserName);
-    await expect(page).toHaveURL(/\/docs\/mocked-document-id\/$/);
+    await expect(page.locator('h2').getByText('Mocked document')).toBeVisible();
   });
 
   test('The homepage redirects to login.', async ({ page }) => {

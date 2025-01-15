@@ -1,6 +1,12 @@
 import { UseQueryOptions, useQuery } from '@tanstack/react-query';
 
-import { APIError, APIList, errorCauses, fetchAPI } from '@/api';
+import {
+  APIError,
+  APIList,
+  errorCauses,
+  fetchAPI,
+  useAPIInfiniteQuery,
+} from '@/api';
 
 import { Doc } from '../types';
 
@@ -22,16 +28,33 @@ export type DocsOrdering = (typeof docsOrdering)[number];
 export type DocsParams = {
   page: number;
   ordering?: DocsOrdering;
+  is_creator_me?: boolean;
+  title?: string;
+  is_favorite?: boolean;
 };
 
 export type DocsResponse = APIList<Doc>;
+export const getDocs = async (params: DocsParams): Promise<DocsResponse> => {
+  const searchParams = new URLSearchParams();
+  if (params.page) {
+    searchParams.set('page', params.page.toString());
+  }
 
-export const getDocs = async ({
-  ordering,
-  page,
-}: DocsParams): Promise<DocsResponse> => {
-  const orderingQuery = ordering ? `&ordering=${ordering}` : '';
-  const response = await fetchAPI(`documents/?page=${page}${orderingQuery}`);
+  if (params.ordering) {
+    searchParams.set('ordering', params.ordering);
+  }
+  if (params.is_creator_me !== undefined) {
+    searchParams.set('is_creator_me', params.is_creator_me.toString());
+  }
+
+  if (params.title && params.title.length > 0) {
+    searchParams.set('title', params.title);
+  }
+  if (params.is_favorite !== undefined) {
+    searchParams.set('is_favorite', params.is_favorite.toString());
+  }
+
+  const response = await fetchAPI(`documents/?${searchParams.toString()}`);
 
   if (!response.ok) {
     throw new APIError('Failed to get the docs', await errorCauses(response));
@@ -52,3 +75,7 @@ export function useDocs(
     ...queryConfig,
   });
 }
+
+export const useInfiniteDocs = (params: DocsParams) => {
+  return useAPIInfiniteQuery(KEY_LIST_DOC, getDocs, params);
+};

@@ -37,43 +37,87 @@ ingress:
   ## @param ingress.hosts Additional host to configure for the Ingress
   hosts: []
   #  - chart-example.local
-  ## @param ingress.tls.enabled Wether to enable TLS for the Ingress
+  ## @param ingress.tls.enabled Weather to enable TLS for the Ingress
+  ## @param ingress.tls.secretName Secret name for TLS config
   ## @skip ingress.tls.additional
   ## @extra ingress.tls.additional[].secretName Secret name for additional TLS config
   ## @extra ingress.tls.additional[].hosts[] Hosts for additional TLS config
   tls:
     enabled: true
+    secretName: null
     additional: []
 
   ## @param ingress.customBackends Add custom backends to ingress
   customBackends: []
 
-## @param ingressWS.enabled whether to enable the Ingress or not
-## @param ingressWS.className IngressClass to use for the Ingress
-## @param ingressWS.host Host for the Ingress
-## @param ingressWS.path Path to use for the Ingress
-ingressWS:
+## @param ingressCollaborationWS.enabled whether to enable the Ingress or not
+## @param ingressCollaborationWS.className IngressClass to use for the Ingress
+## @param ingressCollaborationWS.host Host for the Ingress
+## @param ingressCollaborationWS.path Path to use for the Ingress
+ingressCollaborationWS:
   enabled: false
   className: null
   host: impress.example.com
-  path: /ws
-  ## @param ingress.hosts Additional host to configure for the Ingress
+  path: /collaboration/ws/
+  ## @param ingressCollaborationWS.hosts Additional host to configure for the Ingress
   hosts: []
   #  - chart-example.local
-  ## @param ingressWS.tls.enabled Wether to enable TLS for the Ingress
-  ## @skip ingressWS.tls.additional
-  ## @extra ingressWS.tls.additional[].secretName Secret name for additional TLS config
-  ## @extra ingressWS.tls.additional[].hosts[] Hosts for additional TLS config
+  ## @param ingressCollaborationWS.tls.enabled Weather to enable TLS for the Ingress
+  ## @param ingressCollaborationWS.tls.secretName Secret name for TLS config
+  ## @skip ingressCollaborationWS.tls.additional
+  ## @extra ingressCollaborationWS.tls.additional[].secretName Secret name for additional TLS config
+  ## @extra ingressCollaborationWS.tls.additional[].hosts[] Hosts for additional TLS config
   tls:
     enabled: true
+    secretName: null
     additional: []
 
-  ## @param ingressWS.customBackends Add custom backends to ingress
+  ## @param ingressCollaborationWS.customBackends Add custom backends to ingress
   customBackends: []
 
-  annotations: 
-    nginx.ingress.kubernetes.io/enable-websocket: "true" 
-    nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"
+  ## @param ingressCollaborationWS.annotations.nginx.ingress.kubernetes.io/auth-response-headers
+  ## @param ingressCollaborationWS.annotations.nginx.ingress.kubernetes.io/auth-url
+  ## @param ingressCollaborationWS.annotations.nginx.ingress.kubernetes.io/enable-websocket
+  ## @param ingressCollaborationWS.annotations.nginx.ingress.kubernetes.io/proxy-read-timeout
+  ## @param ingressCollaborationWS.annotations.nginx.ingress.kubernetes.io/proxy-send-timeout
+  ## @param ingressCollaborationWS.annotations.nginx.ingress.kubernetes.io/upstream-hash-by
+  annotations:
+    nginx.ingress.kubernetes.io/auth-response-headers: "Authorization, X-Can-Edit, X-User-Id"
+    nginx.ingress.kubernetes.io/auth-url: https://impress.example.com/api/v1.0/documents/collaboration-auth/
+    nginx.ingress.kubernetes.io/enable-websocket: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
+    nginx.ingress.kubernetes.io/upstream-hash-by: $arg_room
+
+## @param ingressCollaborationApi.enabled whether to enable the Ingress or not
+## @param ingressCollaborationApi.className IngressClass to use for the Ingress
+## @param ingressCollaborationApi.host Host for the Ingress
+## @param ingressCollaborationApi.path Path to use for the Ingress
+ingressCollaborationApi:
+  enabled: false
+  className: null
+  host: impress.example.com
+  path: /collaboration/api/
+  ## @param ingressCollaborationApi.hosts Additional host to configure for the Ingress
+  hosts: []
+  #  - chart-example.local
+  ## @param ingressCollaborationApi.tls.enabled Weather to enable TLS for the Ingress
+  ## @param ingressCollaborationApi.tls.secretName Secret name for TLS config
+  ## @skip ingressCollaborationApi.tls.additional
+  ## @extra ingressCollaborationApi.tls.additional[].secretName Secret name for additional TLS config
+  ## @extra ingressCollaborationApi.tls.additional[].hosts[] Hosts for additional TLS config
+  tls:
+    enabled: true
+    secretName: null
+    additional: []
+
+  ## @param ingressCollaborationApi.customBackends Add custom backends to ingress
+  customBackends: []
+
+  ## @param ingressCollaborationApi.annotations.nginx.ingress.kubernetes.io/upstream-hash-by
+  annotations:
+    nginx.ingress.kubernetes.io/upstream-hash-by: $arg_room
+
 
 ## @param ingressAdmin.enabled whether to enable the Ingress or not
 ## @param ingressAdmin.className IngressClass to use for the Ingress
@@ -87,12 +131,14 @@ ingressAdmin:
   ## @param ingressAdmin.hosts Additional host to configure for the Ingress
   hosts: [ ]
   #  - chart-example.local
-  ## @param ingressAdmin.tls.enabled Wether to enable TLS for the Ingress
+  ## @param ingressAdmin.tls.enabled Weather to enable TLS for the Ingress
+  ## @param ingressAdmin.tls.secretName Secret name for TLS config
   ## @skip ingressAdmin.tls.additional
   ## @extra ingressAdmin.tls.additional[].secretName Secret name for additional TLS config
   ## @extra ingressAdmin.tls.additional[].hosts[] Hosts for additional TLS config
   tls:
     enabled: true
+    secretName: null
     additional: []
 
 ## @param ingressMedia.enabled whether to enable the Ingress or not
@@ -107,19 +153,27 @@ ingressMedia:
   ## @param ingressMedia.hosts Additional host to configure for the Ingress
   hosts: [ ]
   #  - chart-example.local
-  ## @param ingressMedia.tls.enabled Wether to enable TLS for the Ingress
+  ## @param ingressMedia.tls.enabled Weather to enable TLS for the Ingress
+  ## @param ingressMedia.tls.secretName Secret name for TLS config
   ## @skip ingressMedia.tls.additional
   ## @extra ingressMedia.tls.additional[].secretName Secret name for additional TLS config
   ## @extra ingressMedia.tls.additional[].hosts[] Hosts for additional TLS config
   tls:
     enabled: true
+    secretName: null
     additional: []
 
+  ## @param ingressMedia.annotations.nginx.ingress.kubernetes.io/auth-url
+  ## @param ingressMedia.annotations.nginx.ingress.kubernetes.io/auth-response-headers
+  ## @param ingressMedia.annotations.nginx.ingress.kubernetes.io/upstream-vhost
   annotations:
-    nginx.ingress.kubernetes.io/auth-url: https://impress.example.com/api/v1.0/documents/retrieve-auth/
+    nginx.ingress.kubernetes.io/auth-url: https://impress.example.com/api/v1.0/documents/media-auth/
     nginx.ingress.kubernetes.io/auth-response-headers: "Authorization, X-Amz-Date, X-Amz-Content-SHA256"
     nginx.ingress.kubernetes.io/upstream-vhost: minio.impress.svc.cluster.local:9000
 
+## @param serviceMedia.host
+## @param serviceMedia.port
+## @param serviceMedia.annotations
 serviceMedia:
   host: minio.impress.svc.cluster.local
   port: 9000
@@ -164,6 +218,9 @@ backend:
   ## @param backend.podAnnotations Annotations to add to the backend Pod
   podAnnotations: {}
 
+  ## @param backend.dpAnnotations Annotations to add to the backend Deployment
+  dpAnnotations: {}
+
   ## @param backend.service.type backend Service type
   ## @param backend.service.port backend Service listening port
   ## @param backend.service.targetPort backend container listening port
@@ -182,6 +239,16 @@ backend:
       - "manage.py"
       - "migrate"
       - "--no-input"
+    restartPolicy: Never
+
+ ## @param backend.createsuperuser.command backend migrate command
+ ## @param backend.createsuperuser.restartPolicy backend migrate job restart policy
+  createsuperuser:
+    command:
+      - "/bin/sh"
+      - "-c"
+      - |
+        python manage.py createsuperuser --email $DJANGO_SUPERUSER_EMAIL --password $DJANGO_SUPERUSER_PASSWORD
     restartPolicy: Never
 
   ## @param backend.probes.liveness.path [nullable] Configure path for backend HTTP liveness probe
@@ -270,6 +337,9 @@ frontend:
 
   ## @param frontend.podAnnotations Annotations to add to the frontend Pod
   podAnnotations: {}
+
+  ## @param frontend.dpAnnotations Annotations to add to the frontend Deployment
+  dpAnnotations: {}
 
   ## @param frontend.service.type frontend Service type
   ## @param frontend.service.port frontend Service listening port
@@ -362,6 +432,9 @@ yProvider:
   ## @param yProvider.podAnnotations Annotations to add to the yProvider Pod
   podAnnotations: {}
 
+  ## @param yProvider.dpAnnotations Annotations to add to the yProvider Deployment
+  dpAnnotations: {}
+
   ## @param yProvider.service.type yProvider Service type
   ## @param yProvider.service.port yProvider Service listening port
   ## @param yProvider.service.targetPort yProvider container listening port
@@ -372,7 +445,6 @@ yProvider:
     targetPort: 4444
     annotations: {}
 
-  ## @param yProvider.probes Configure probe for yProvider
   ## @extra yProvider.probes.liveness.path Configure path for yProvider HTTP liveness probe
   ## @extra yProvider.probes.liveness.targetPort Configure port for yProvider HTTP liveness probe
   ## @extra yProvider.probes.liveness.initialDelaySeconds Configure initial delay for yProvider liveness probe
@@ -387,6 +459,8 @@ yProvider:
   ## @extra yProvider.probes.readiness.initialDelaySeconds Configure timeout for yProvider readiness probe
   probes:
     liveness:
+      ## @param yProvider.probes.liveness.path
+      ## @param yProvider.probes.liveness.initialDelaySeconds
       path: /ping
       initialDelaySeconds: 10
 

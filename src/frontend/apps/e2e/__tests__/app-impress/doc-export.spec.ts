@@ -3,13 +3,44 @@ import cs from 'convert-stream';
 import jsdom from 'jsdom';
 import pdf from 'pdf-parse';
 
-import { createDoc } from './common';
+import { createDoc, verifyDocName } from './common';
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
 
 test.describe('Doc Export', () => {
+  test('it check if all elements are visible', async ({
+    page,
+    browserName,
+  }) => {
+    await createDoc(page, 'doc-editor', browserName, 1);
+    await page
+      .getByRole('button', {
+        name: 'download',
+      })
+      .click();
+
+    await expect(
+      page
+        .locator('div')
+        .filter({ hasText: /^Download$/ })
+        .first(),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        'Upload your docs to a Microsoft Word, Open Office or PDF document',
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('combobox', { name: 'Template' }),
+    ).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Format' })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Close the modal' }),
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Download' })).toBeVisible();
+  });
   test('it converts the doc to pdf with a template integrated', async ({
     page,
     browserName,
@@ -20,15 +51,14 @@ test.describe('Doc Export', () => {
       return download.suggestedFilename().includes(`${randomDoc}.pdf`);
     });
 
-    await expect(page.locator('h2').getByText(randomDoc)).toBeVisible();
+    await verifyDocName(page, randomDoc);
 
     await page.locator('.ProseMirror.bn-editor').click();
     await page.locator('.ProseMirror.bn-editor').fill('Hello World');
 
-    await page.getByLabel('Open the document options').click();
     await page
       .getByRole('button', {
-        name: 'Export',
+        name: 'download',
       })
       .click();
 
@@ -57,19 +87,19 @@ test.describe('Doc Export', () => {
       return download.suggestedFilename().includes(`${randomDoc}.docx`);
     });
 
-    await expect(page.locator('h2').getByText(randomDoc)).toBeVisible();
+    await verifyDocName(page, randomDoc);
 
     await page.locator('.ProseMirror.bn-editor').click();
     await page.locator('.ProseMirror.bn-editor').fill('Hello World');
 
-    await page.getByLabel('Open the document options').click();
     await page
       .getByRole('button', {
-        name: 'Export',
+        name: 'download',
       })
       .click();
 
-    await page.getByText('Docx').click();
+    await page.getByRole('combobox', { name: 'Format' }).click();
+    await page.getByRole('option', { name: 'Word / Open Office' }).click();
 
     await page
       .getByRole('button', {
@@ -85,7 +115,7 @@ test.describe('Doc Export', () => {
     page,
     browserName,
   }) => {
-    test.slow();
+    test.setTimeout(60000);
 
     const [randomDoc] = await createDoc(page, 'doc-editor', browserName, 1);
     let body = '';
@@ -97,7 +127,7 @@ test.describe('Doc Export', () => {
       await route.continue();
     });
 
-    await expect(page.locator('h2').getByText(randomDoc)).toBeVisible();
+    await verifyDocName(page, randomDoc);
 
     await page.locator('.bn-block-outer').last().fill('Hello World');
     await page.locator('.bn-block-outer').last().click();
@@ -190,10 +220,9 @@ test.describe('Doc Export', () => {
       .click();
 
     // Download
-    await page.getByLabel('Open the document options').click();
     await page
       .getByRole('button', {
-        name: 'Export',
+        name: 'download',
       })
       .click();
 
