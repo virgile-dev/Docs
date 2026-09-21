@@ -6,6 +6,10 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- ✨(docspec) handle DocSpec 4xx/5xx import errors distinctly #2552
+
 ## [v6.0.1] - 2026-10-15
 
 ### Added
