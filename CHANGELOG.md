@@ -10,6 +10,10 @@ and this project adheres to
 
 - ✨(docspec) handle DocSpec 4xx/5xx import errors distinctly #2552
 
+### Changed
+
+- ♻️(frontend) replace outdated AGPL mentions of BlockNote XL packages #2775
+
 ## [v6.0.1] - 2026-10-15
 
 ### Added
