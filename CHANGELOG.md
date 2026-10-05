@@ -13,6 +13,7 @@ and this project adheres to
 ### Changed
 
 - ♻️(frontend) replace outdated AGPL mentions of BlockNote XL packages #2775
+- 💄(frontend) update upload loader and error ui #2778
 
 ## [v6.0.1] - 2026-10-15
 
