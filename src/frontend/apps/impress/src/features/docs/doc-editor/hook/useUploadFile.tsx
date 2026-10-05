@@ -4,7 +4,7 @@ import { captureException } from '@sentry/nextjs';
 import { useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { backendUrl } from '@/api';
+import { APIError, backendUrl } from '@/api';
 import { useConfig } from '@/core';
 import { useToast } from '@/hooks';
 import { formatFileSize } from '@/utils';
@@ -44,11 +44,7 @@ export const useUploadFile = (docId: string) => {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { data: config } = useConfig();
-  const {
-    mutateAsync: createDocAttachment,
-    isError: isErrorAttachment,
-    error: errorAttachment,
-  } = useCreateDocAttachment();
+  const { mutateAsync: createDocAttachment } = useCreateDocAttachment();
 
   const maxFileSize = config?.DOCUMENT_IMAGE_MAX_SIZE ?? DEFAULT_MAX_FILE_SIZE;
 
@@ -75,21 +71,32 @@ export const useUploadFile = (docId: string) => {
       const body = new FormData();
       body.append('file', file);
 
-      const ret = await createDocAttachment({
-        docId,
-        body,
-      });
+      try {
+        const ret = await createDocAttachment({
+          docId,
+          body,
+        });
 
-      return `${backendUrl()}${ret.file}`;
+        return `${backendUrl()}${ret.file}`;
+      } catch (error) {
+        const causes = error instanceof APIError ? error.cause : undefined;
+
+        toast(
+          causes?.length
+            ? `${t('A problem occurred while uploading the file, cause:')} ${causes.join(' ')}`
+            : t(
+                'A problem occurred while uploading the file, please try again.',
+              ),
+          VariantType.ERROR,
+        );
+
+        throw error;
+      }
     },
     [createDocAttachment, docId, maxFileSize, t, toast],
   );
 
-  return {
-    uploadFile,
-    isErrorAttachment,
-    errorAttachment,
-  };
+  return { uploadFile };
 };
 
 /**
@@ -132,7 +139,7 @@ export const useUploadStatus = (editor: DocsBlockNoteEditor) => {
             {
               type: 'uploadLoader',
               props: {
-                information: t('Analyzing file...'),
+                information: t('Analyzing the file'),
                 type: 'loading',
                 blockUploadName,
                 blockUploadType,
