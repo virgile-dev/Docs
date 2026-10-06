@@ -3,7 +3,6 @@ import {
   TreeDataItem,
   TreeView,
   TreeViewMoveResult,
-  useResponsive,
   useTreeContext,
 } from '@gouvfr-lasuite/ui-components';
 import { useRouter } from 'next/router';
@@ -13,6 +12,7 @@ import { NodeApi } from 'react-arborist';
 import { Overlayer } from '@/components';
 import { Doc, useMoveDoc } from '@/docs/doc-management';
 import { focusMainContentStart } from '@/layouts/utils';
+import { useResponsiveStore } from '@/stores/useResponsiveStore';
 
 import { isDocNode, isWithinTreeItemActions } from '../utils';
 
@@ -35,7 +35,7 @@ export const DocTreeSubpages = memo(function DocTreeSubpages({
   rootNodeId,
   rootItemRef,
 }: DocTreeSubPagesProps) {
-  const { isDesktop } = useResponsive();
+  const { hasCoarsePointer } = useResponsiveStore();
   const treeContext = useTreeContext<Doc | null>();
   const { mutateAsync: moveDoc } = useMoveDoc();
   const { query } = useRouter();
@@ -97,11 +97,11 @@ export const DocTreeSubpages = memo(function DocTreeSubpages({
     ({ parentNode }: { parentNode: NodeApi<TreeDataItem<Doc>> | null }) => {
       const parentValue = parentNode?.data.value;
       if (!parentValue || !isDocNode(parentValue)) {
-        return canMoveInto && isDesktop;
+        return canMoveInto && !hasCoarsePointer;
       }
-      return parentValue.abilities.move && isDesktop;
+      return parentValue.abilities.move && !hasCoarsePointer;
     },
-    [canMoveInto, isDesktop],
+    [canMoveInto, hasCoarsePointer],
   );
 
   const canDrag = useCallback(
@@ -109,9 +109,9 @@ export const DocTreeSubpages = memo(function DocTreeSubpages({
       if (!isDocNode(node.value)) {
         return false;
       }
-      return node.value.abilities.move && isDesktop;
+      return node.value.abilities.move && !hasCoarsePointer;
     },
-    [isDesktop],
+    [hasCoarsePointer],
   );
 
   const handleRowKeyDown = useCallback(
