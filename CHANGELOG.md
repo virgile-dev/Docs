@@ -13,6 +13,7 @@ and this project adheres to
 ### Fixed
 
 - 🐛(backend) bypass throttling on access/me action from yhub
+- 🐛(frontend) switch language when the current one is untranslated #2790
 
 ## [v6.0.0] - 2026-10-05
 
