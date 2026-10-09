@@ -17,6 +17,7 @@ and this project adheres to
 - 💄(frontend) update upload loader and error ui #2778
 - ⬆️(yhub) upgrade @y/hub to 0.10.1 #2853
 - ♿️(frontend) allow opening the home button in a new tab #2839
+- 💄(frontend) use 12px for error page home links #2809
 
 ### Fixed
 
