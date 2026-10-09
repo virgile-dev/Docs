@@ -123,6 +123,13 @@ const createPersistence = (storeId: string, doc: Y.Doc) => {
   }
 };
 
+/**
+ * An empty document is not worth rendering yet: on a device that never opened the doc it would
+ * show the empty-doc placeholder until the server's content lands, which reads as a deleted doc.
+ */
+const hasContent = (doc: Y.Doc) =>
+  doc.getXmlFragment('document-store').length > 0;
+
 export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
   ...defaultValues,
   createProvider: (wsUrl, storeId, initialDoc, { readOnly = false } = {}) => {
@@ -146,9 +153,14 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
 
       /**
        * The editor waits on `isReady` (see `DocEditor`), and local content is enough to render:
-       * whatever the connection then brings merges into what is already on screen.
+       * whatever the connection then brings merges into what is already on screen. An empty local
+       * copy is not (see `hasContent`): it waits for the sync.
        */
-      persistence.on('synced', () => set({ isReady: true }));
+      persistence.on('synced', () => {
+        if (hasContent(doc)) {
+          set({ isReady: true });
+        }
+      });
     }
 
     const provider = new WebsocketProvider(wsUrl, storeId, doc, {
@@ -213,8 +225,9 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
       // for sockets that failed to open).
       if (status === 'connected') {
         clearTimeout(lostConnectionTimeout);
-        // An open socket means we are authenticated (auth happens at upgrade)
-        set({ isConnected: true, isReady: true });
+        // An open socket means we are authenticated (auth happens at upgrade). Not ready yet:
+        // the content arrives with the `sync` that follows.
+        set({ isConnected: true });
       }
     });
 
@@ -240,11 +253,16 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
 
       const { isConnected: wasConnected, isReady: wasReady } = get();
 
+      // A closed socket is not the content arriving either: while the local copy is empty, the
+      // `sync` of the http fallback (started by this very close) is what makes the doc ready.
+      // Offline there is nothing to wait for, `useCollaboration` marks it ready.
+      const isReady = wasReady || hasContent(doc);
+
       // This also fires on every failed reconnect attempt - forever, on a network that never
       // lets the socket open. Skip the `set()` once these are already at this value, or a
       // same-value write still hands every no-selector subscriber a new object to re-render on.
-      if (wasConnected || !wasReady) {
-        set({ isConnected: false, isReady: true });
+      if (wasConnected || isReady !== wasReady) {
+        set({ isConnected: false, isReady });
       }
 
       // Only a connection that had actually opened can have been *lost* in a way that means
