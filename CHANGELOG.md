@@ -22,6 +22,7 @@ and this project adheres to
 ### Fixed
 
 - 🔒️(backend) bind comment thread to the path document on creation #2838
+- 🐛(frontend) fix search highlight hidden inside code blocks #2681
 
 ## [v6.0.1] - 2026-10-15
 
