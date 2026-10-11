@@ -307,6 +307,7 @@ export const DocMoveModal = ({
                         <DocsGridItemTitle
                           doc={docSearch}
                           withTooltip={false}
+                          breadcrumb={docSearch.parent?.title}
                         />
                         <DocsGridItemDate
                           doc={docSearch}
