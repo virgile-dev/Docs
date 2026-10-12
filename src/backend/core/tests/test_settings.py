@@ -47,6 +47,34 @@ def test_settings_yhub_reset_connections_batch_size_zero():
     assert str(excinfo.value) == "YHUB_RESET_CONNECTIONS_BATCH_SIZE must be at least 1."
 
 
+def test_settings_collaboration_http_fallback_sync_interval_too_low():
+    """A polling interval under 5 seconds would flood the backend and is refused."""
+
+    class TestSettings(Base):
+        """Fake test settings."""
+
+        COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL = 4999
+
+    with pytest.raises(ValueError) as excinfo:
+        TestSettings().post_setup()
+
+    assert str(excinfo.value) == (
+        "COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL must be at least 5000 "
+        "(milliseconds)."
+    )
+
+
+def test_settings_collaboration_http_fallback_sync_interval_minimum():
+    """The minimum polling interval itself is accepted."""
+
+    class TestSettings(Base):
+        """Fake test settings."""
+
+        COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL = 5000
+
+    TestSettings.post_setup()
+
+
 def test_settings_psycopg_pool_not_enabled():
     """
     Test that not changing DB_PSYCOPG_POOL_ENABLED should not configure psycopg in the DATABASES

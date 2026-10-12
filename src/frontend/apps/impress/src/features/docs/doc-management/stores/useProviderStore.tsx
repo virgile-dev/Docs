@@ -9,6 +9,9 @@ import { Base64 } from '@/docs/doc-management';
 
 import { rememberLocalDoc } from '../localDocs';
 
+/** Lowest polling interval of the http fallback, mirrored by the backend setting. */
+const HTTP_SYNC_INTERVAL_MIN_MS = 5000;
+
 /**
  * `readOnly` decides whether this client may publish presence. It has to be known
  * when the providers are built, not merely when the editor renders: the http
@@ -17,6 +20,11 @@ import { rememberLocalDoc } from '../localDocs';
  */
 export interface CreateProviderOptions {
   readOnly?: boolean;
+  /**
+   * How often the http fallback polls, in milliseconds (`COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL`).
+   * Left undefined, the provider's own default applies.
+   */
+  httpSyncInterval?: number;
 }
 
 export interface UseCollaborationStore {
@@ -132,7 +140,12 @@ const hasContent = (doc: Y.Doc) =>
 
 export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
   ...defaultValues,
-  createProvider: (wsUrl, storeId, initialDoc, { readOnly = false } = {}) => {
+  createProvider: (
+    wsUrl,
+    storeId,
+    initialDoc,
+    { readOnly = false, httpSyncInterval } = {},
+  ) => {
     const doc = new Y.Doc({
       guid: storeId,
     });
@@ -207,6 +220,18 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
             awareness: readOnly ? null : provider.awareness,
             // createWebsocketFallback owns the connection state
             connect: false,
+            // every poll is authorized against the backend: this is the knob on that load. The
+            // provider caps it at 15s while it carries awareness, that is for an editor.
+            // The floor guards against a misconfigured value, the backend refuses one too
+            // low; it is no protection against a tampered client
+            ...(httpSyncInterval
+              ? {
+                  syncInterval: Math.max(
+                    httpSyncInterval,
+                    HTTP_SYNC_INTERVAL_MIN_MS,
+                  ),
+                }
+              : null),
             // Docs users are served the garbage-collected document; a full-history request is
             // refused by the collaboration server, and this defaults to `false`
             gc: true,

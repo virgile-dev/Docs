@@ -6,6 +6,10 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- ✨(backend) add a setting for the http fallback polling interval #2827
+
 ### Changed
 
 - 🔧(helm) allow to set the period and failure threshold of probes

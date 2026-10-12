@@ -565,6 +565,14 @@ class Base(Configuration):
         environ_name="COLLABORATION_WS_INACTIVITY_TIMEOUT",
         environ_prefix=None,
     )
+    # How often, in milliseconds, a browser whose websocket cannot open polls the
+    # collaboration server over http instead. Every poll is authorized against the
+    # backend, so this sets most of the load such browsers put on it. At least 5000.
+    COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL = values.PositiveIntegerValue(
+        10000,
+        environ_name="COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL",
+        environ_prefix=None,
+    )
     # Granularity of the document version history, in milliseconds.
     # Increase or decrease this value to adjust the granularity of version history.
     COLLABORATION_VERSION_GRANULARITY_MS = values.IntegerValue(
@@ -1505,6 +1513,14 @@ class Base(Configuration):
         # a batch of nothing would walk no subtree and never end
         if cls.YHUB_RESET_CONNECTIONS_BATCH_SIZE < 1:
             raise ValueError("YHUB_RESET_CONNECTIONS_BATCH_SIZE must be at least 1.")
+
+        # every browser on the http fallback authorizes each poll against the backend:
+        # a few milliseconds, or seconds typed as milliseconds, would flood it
+        if cls.COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL < 5000:
+            raise ValueError(
+                "COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL must be at least 5000 "
+                "(milliseconds)."
+            )
 
         if cls.POSTHOG_KEY is not None:
             posthog.api_key = cls.POSTHOG_KEY

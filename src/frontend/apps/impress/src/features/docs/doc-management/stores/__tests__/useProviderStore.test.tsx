@@ -327,6 +327,50 @@ describe('useProviderStore', () => {
     });
   });
 
+  it('leaves the http fallback on its default interval when none is configured', () => {
+    expect(HttpProviderMock.mock.calls[0][3]).not.toHaveProperty(
+      'syncInterval',
+    );
+  });
+
+  it('polls the http fallback at the configured interval', () => {
+    useProviderStore.getState().destroyProvider();
+    HttpProviderMock.mockClear();
+
+    useProviderStore
+      .getState()
+      .createProvider(
+        'ws://localhost/collaboration/ws/v1/docs',
+        'doc-id',
+        undefined,
+        { httpSyncInterval: 30000 },
+      );
+
+    // COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL: every poll is authorized against
+    // the backend, so this is what an operator turns to lower that load
+    expect(HttpProviderMock.mock.calls[0][3]).toMatchObject({
+      syncInterval: 30000,
+    });
+  });
+
+  it('never polls the http fallback faster than every 5 seconds', () => {
+    useProviderStore.getState().destroyProvider();
+    HttpProviderMock.mockClear();
+
+    useProviderStore
+      .getState()
+      .createProvider(
+        'ws://localhost/collaboration/ws/v1/docs',
+        'doc-id',
+        undefined,
+        { httpSyncInterval: 100 },
+      );
+
+    expect(HttpProviderMock.mock.calls[0][3]).toMatchObject({
+      syncInterval: 5000,
+    });
+  });
+
   it('gives a read-only document no awareness on the http fallback', () => {
     useProviderStore.getState().destroyProvider();
     HttpProviderMock.mockClear();

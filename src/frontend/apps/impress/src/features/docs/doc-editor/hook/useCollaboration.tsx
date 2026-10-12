@@ -118,6 +118,7 @@ export const useCollaboration = (room: string, readOnly = false) => {
 
     const newProvider = createProvider(collaborationUrl, room, undefined, {
       readOnly,
+      httpSyncInterval: config?.COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL,
     });
     setBroadcastProvider(newProvider);
   }, [
@@ -126,6 +127,7 @@ export const useCollaboration = (room: string, readOnly = false) => {
     createProvider,
     room,
     readOnly,
+    config?.COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL,
     setBroadcastProvider,
   ]);
 
