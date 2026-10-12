@@ -17,6 +17,7 @@ and this project adheres to
 
 ### Fixed
 
+- 🐛(frontend) stop the http fallback when the collaboration server refuses it
 - 🐛(backend) bypass throttling on access/me action from yhub
 - 🐛(frontend) switch language when the current one is untranslated #2790
 - 🐛(frontend) keep the loading skeleton until an empty doc has synced #2817

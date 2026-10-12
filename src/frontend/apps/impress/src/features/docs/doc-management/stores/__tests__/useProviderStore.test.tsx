@@ -73,6 +73,15 @@ class FakeHttpProvider {
   emit(event: string, ...args: unknown[]) {
     this.listeners[event]?.forEach((listener) => listener(...args));
   }
+
+  /**
+   * What `HttpProvider` does when a round fails with a client error other than 429: it stops
+   * by clearing `shouldConnect`, then emits `closed` with the http status as the code.
+   */
+  giveUp(code: number) {
+    this.shouldConnect = false;
+    this.emit('closed', { code, reason: '' }, this);
+  }
 }
 
 /**
@@ -295,6 +304,57 @@ describe('useProviderStore', () => {
 
     expect(provider.connect).not.toHaveBeenCalled();
     expect(useProviderStore.getState().isPermanentlyClosed).toBe(true);
+  });
+
+  it.each([
+    ['a revoked or downgraded access', 403],
+    ['an expired session', 401],
+    ['a deleted document', 404],
+  ])(
+    'stops for good when the http fallback is refused on %s',
+    (_label, code) => {
+      // a network that blocks websockets: the fallback carries the document
+      closeWith(1006);
+      httpProvider.connect();
+
+      httpProvider.giveUp(code);
+
+      // the helper would otherwise revive the fallback every 30s, and it would be
+      // refused again on every round, for as long as the tab stays open
+      expect(stopFallback).toHaveBeenCalled();
+      expect(httpProvider.shouldConnect).toBe(false);
+      // and the socket stops asking the same question too
+      expect(provider.disconnect).toHaveBeenCalled();
+      expect(provider.shouldConnect).toBe(false);
+
+      vi.runAllTimers();
+
+      // the backend is asked what became of the document and of our access
+      expect(useProviderStore.getState().isPermanentlyClosed).toBe(true);
+      expect(useProviderStore.getState().hasLostConnection).toBe(false);
+    },
+  );
+
+  it('reopens both transports after the http fallback was refused', () => {
+    httpProvider.giveUp(403);
+    vi.runAllTimers();
+
+    useProviderStore.getState().reconnect();
+
+    expect(provider.connect).toHaveBeenCalled();
+    expect(useProviderStore.getState().isPermanentlyClosed).toBe(false);
+    expect(createWebsocketFallback).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves another client error of the http fallback to its own retry', () => {
+    // a refetch of the document cannot settle a malformed or oversized request:
+    // reconnecting would only reproduce it
+    httpProvider.giveUp(413);
+    vi.runAllTimers();
+
+    expect(stopFallback).not.toHaveBeenCalled();
+    expect(provider.disconnect).not.toHaveBeenCalled();
+    expect(useProviderStore.getState().isPermanentlyClosed).toBe(false);
   });
 
   it('runs the http fallback on the same document and awareness', () => {

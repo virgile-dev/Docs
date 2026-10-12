@@ -76,6 +76,12 @@ const defaultValues = {
  */
 const RECONNECT_JITTER_MAX_MS = 3000;
 
+/**
+ * The http statuses with which the collaboration server refuses a caller rather than fails:
+ * signed out, not allowed (or no longer allowed to write), or a document that is gone.
+ */
+const ACCESS_REFUSED_STATUSES = [401, 403, 404];
+
 let lostConnectionTimeout: ReturnType<typeof setTimeout> | undefined;
 /**
  * Uninstalls the http fallback, or undefined while it is not installed. Held here rather than
@@ -329,7 +335,7 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
      * too, and the connection has to be made again to carry the new rights. Asking the backend
      * is what settles it, in `useCollaboration`, which resumes through `reconnect` below.
      */
-    provider.on('closed', () => {
+    const closePermanently = () => {
       suspendFallback(httpProvider);
 
       // beats the hasLostConnection timer the close above has just armed
@@ -338,6 +344,25 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
         () => set({ isPermanentlyClosed: true }),
         Math.random() * RECONNECT_JITTER_MAX_MS,
       );
+    };
+
+    provider.on('closed', closePermanently);
+
+    /**
+     * The same refusal, heard on the http fallback. Where the socket never opens, no 4401
+     * arrives, and the helper revives a fallback that gave up every 30s: the tab would take a
+     * 403 again and again while its editor accepts changes that are never saved.
+     *
+     * Only access answers count: another client error is not settled by a refetch of the
+     * document, so it is left to the helper's slow retry.
+     */
+    httpProvider?.on('closed', ({ code }) => {
+      if (!ACCESS_REFUSED_STATUSES.includes(code)) {
+        return;
+      }
+
+      provider.disconnect();
+      closePermanently();
     });
 
     set({
