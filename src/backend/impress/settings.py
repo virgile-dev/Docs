@@ -564,20 +564,28 @@ class Base(Configuration):
         environ_name="COLLABORATION_WS_INACTIVITY_TIMEOUT",
         environ_prefix=None,
     )
-    # How often, in milliseconds, a browser whose websocket cannot open polls the
-    # collaboration server over http instead. Every poll is authorized against the
-    # backend, so this sets most of the load such browsers put on it. At least 5000.
-    COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL = values.PositiveIntegerValue(
-        10000,
-        environ_name="COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL",
-        environ_prefix=None,
-    )
     # Whether an editor on that http fallback also publishes and receives presence
     # (cursors). Turning it off drops the periodic presence update and the 15 seconds
     # cap on the polling interval, at the price of no remote cursors on the fallback.
     COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED = values.BooleanValue(
         True,
         environ_name="COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED",
+        environ_prefix=None,
+    )
+    # Whether a browser whose websocket cannot open talks json, with the binary parts
+    # in base64, to the collaboration server over http instead of the lib0-any binary
+    # format, for the networks whose firewall refuses its content type.
+    COLLABORATION_HTTP_FALLBACK_JSON_ENABLED = values.BooleanValue(
+        False,
+        environ_name="COLLABORATION_HTTP_FALLBACK_JSON_ENABLED",
+        environ_prefix=None,
+    )
+    # How often, in milliseconds, a browser whose websocket cannot open polls the
+    # collaboration server over http instead. Every poll is authorized against the
+    # backend, so this sets most of the load such browsers put on it. At least 5000.
+    COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL = values.PositiveIntegerValue(
+        10000,
+        environ_name="COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL",
         environ_prefix=None,
     )
     # Granularity of the document version history, in milliseconds.

@@ -7,6 +7,7 @@ import { create } from 'zustand';
 import { collaborationHttpTarget } from '@/core/config/hooks/useCollaborationUrl';
 import { Base64 } from '@/docs/doc-management';
 
+import { withJsonTransport } from '../api/httpFallbackJson';
 import { rememberLocalDoc } from '../localDocs';
 
 /** Lowest polling interval of the http fallback, mirrored by the backend setting. */
@@ -20,6 +21,11 @@ const HTTP_SYNC_INTERVAL_MIN_MS = 5000;
  */
 export interface CreateProviderOptions {
   readOnly?: boolean;
+  /**
+   * Whether the http fallback talks json, with the binary fields in base64,
+   * or lib0-any (`COLLABORATION_HTTP_FALLBACK_JSON_ENABLED`)
+   */
+  httpJson?: boolean;
   /**
    * How often the http fallback polls, in milliseconds (`COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL`).
    * Left undefined, the provider's own default applies.
@@ -155,7 +161,12 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
     wsUrl,
     storeId,
     initialDoc,
-    { readOnly = false, httpSyncInterval, httpAwareness = true } = {},
+    {
+      httpAwareness = true,
+      httpJson = false,
+      httpSyncInterval,
+      readOnly = false,
+    } = {},
   ) => {
     const doc = new Y.Doc({
       guid: storeId,
@@ -222,6 +233,9 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
      * postcard from the past anyway.
      */
     const target = collaborationHttpTarget(wsUrl);
+    const send: typeof fetch = (input, init) =>
+      fetch(input, { ...init, credentials: 'include' });
+    const transport = httpJson ? withJsonTransport(send) : send;
     const httpProvider = target
       ? new HttpProvider(
           doc,
@@ -250,7 +264,7 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
             fetch: (input, init) =>
               readOnly && init?.method === 'PATCH'
                 ? readerWriteDropped()
-                : fetch(input, { ...init, credentials: 'include' }),
+                : transport(input, init),
           },
         )
       : undefined;

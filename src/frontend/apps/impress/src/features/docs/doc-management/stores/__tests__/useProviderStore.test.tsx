@@ -593,6 +593,51 @@ describe('useProviderStore', () => {
     expect(realFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('talks lib0-any on the http fallback unless json is asked for', async () => {
+    const realFetch = vi.fn().mockResolvedValue(new Response(null));
+    vi.stubGlobal('fetch', realFetch);
+
+    const { fetch: providerFetch } = HttpProviderMock.mock.calls[0][3] as {
+      fetch: (input: string, init?: RequestInit) => Promise<Response>;
+    };
+    await providerFetch('http://collab/ydoc/v1/docs/doc-id');
+
+    // no Accept added, and the cookie goes along as before
+    expect(realFetch).toHaveBeenCalledWith(
+      'http://collab/ydoc/v1/docs/doc-id',
+      {
+        credentials: 'include',
+      },
+    );
+  });
+
+  it('talks json on the http fallback when asked to', async () => {
+    useProviderStore.getState().destroyProvider();
+    HttpProviderMock.mockClear();
+    const realFetch = vi.fn().mockResolvedValue(new Response(null));
+    vi.stubGlobal('fetch', realFetch);
+
+    useProviderStore
+      .getState()
+      .createProvider(
+        'ws://localhost/collaboration/ws/v1/docs',
+        'doc-id',
+        undefined,
+        { httpJson: true },
+      );
+
+    const { fetch: providerFetch } = HttpProviderMock.mock.calls[0][3] as {
+      fetch: (input: string, init?: RequestInit) => Promise<Response>;
+    };
+    await providerFetch('http://collab/ydoc/v1/docs/doc-id');
+
+    // COLLABORATION_HTTP_FALLBACK_JSON_ENABLED: the firewalls that refuse
+    // application/x-lib0any let application/json through
+    const [, init] = realFetch.mock.calls[0] as [string, RequestInit];
+    expect(new Headers(init.headers).get('accept')).toBe('application/json');
+    expect(init.credentials).toBe('include');
+  });
+
   it('still builds an editor in a browser that has no indexeddb', () => {
     useProviderStore.getState().destroyProvider();
     vi.stubGlobal('indexedDB', undefined);
