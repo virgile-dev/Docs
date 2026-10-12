@@ -31,6 +31,7 @@ and this project adheres to
 - 🐛(backend) mark only the top duplicate as a copy, after its title #2855
 - 🐛(yhub) measure migration durations with a monotonic clock #2814
 - 🐛(backend) send the mention email when the cache is unreachable #2803
+- 💄(frontend) remove the vertical line next to nested blocks #2825
 
 ## [v6.0.1] - 2026-10-15
 
