@@ -353,6 +353,26 @@ describe('useProviderStore', () => {
     });
   });
 
+  it('gives an editor no awareness on the http fallback when it is turned off', () => {
+    useProviderStore.getState().destroyProvider();
+    HttpProviderMock.mockClear();
+
+    useProviderStore
+      .getState()
+      .createProvider(
+        'ws://localhost/collaboration/ws/v1/docs',
+        'doc-id',
+        undefined,
+        { httpAwareness: false },
+      );
+
+    // COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED: no presence round, so the
+    // provider only sends when there are changes and polls at the configured pace
+    expect(HttpProviderMock.mock.calls[0][3]).toMatchObject({
+      awareness: null,
+    });
+  });
+
   it('never polls the http fallback faster than every 5 seconds', () => {
     useProviderStore.getState().destroyProvider();
     HttpProviderMock.mockClear();

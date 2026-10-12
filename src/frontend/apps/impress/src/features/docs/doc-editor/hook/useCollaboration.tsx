@@ -119,6 +119,7 @@ export const useCollaboration = (room: string, readOnly = false) => {
     const newProvider = createProvider(collaborationUrl, room, undefined, {
       readOnly,
       httpSyncInterval: config?.COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL,
+      httpAwareness: config?.COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED,
     });
     setBroadcastProvider(newProvider);
   }, [
@@ -128,6 +129,7 @@ export const useCollaboration = (room: string, readOnly = false) => {
     room,
     readOnly,
     config?.COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL,
+    config?.COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED,
     setBroadcastProvider,
   ]);
 

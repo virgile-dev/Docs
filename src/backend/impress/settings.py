@@ -573,6 +573,14 @@ class Base(Configuration):
         environ_name="COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL",
         environ_prefix=None,
     )
+    # Whether an editor on that http fallback also publishes and receives presence
+    # (cursors). Turning it off drops the periodic presence update and the 15 seconds
+    # cap on the polling interval, at the price of no remote cursors on the fallback.
+    COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED = values.BooleanValue(
+        True,
+        environ_name="COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED",
+        environ_prefix=None,
+    )
     # Granularity of the document version history, in milliseconds.
     # Increase or decrease this value to adjust the granularity of version history.
     COLLABORATION_VERSION_GRANULARITY_MS = values.IntegerValue(

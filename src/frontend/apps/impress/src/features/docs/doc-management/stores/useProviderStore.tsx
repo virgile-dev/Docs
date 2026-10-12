@@ -25,6 +25,11 @@ export interface CreateProviderOptions {
    * Left undefined, the provider's own default applies.
    */
   httpSyncInterval?: number;
+  /**
+   * Whether an editor carries presence on the http fallback
+   * (`COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED`). A reader never does. Defaults to true.
+   */
+  httpAwareness?: boolean;
 }
 
 export interface UseCollaborationStore {
@@ -144,7 +149,7 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
     wsUrl,
     storeId,
     initialDoc,
-    { readOnly = false, httpSyncInterval } = {},
+    { readOnly = false, httpSyncInterval, httpAwareness = true } = {},
   ) => {
     const doc = new Y.Doc({
       guid: storeId,
@@ -217,7 +222,7 @@ export const useProviderStore = create<UseCollaborationStore>((set, get) => ({
           target.serverUrl,
           { org: target.org, docid: storeId },
           {
-            awareness: readOnly ? null : provider.awareness,
+            awareness: readOnly || !httpAwareness ? null : provider.awareness,
             // createWebsocketFallback owns the connection state
             connect: false,
             // every poll is authorized against the backend: this is the knob on that load. The
