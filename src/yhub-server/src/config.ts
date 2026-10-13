@@ -58,6 +58,15 @@ export const MIN_MESSAGE_LIFETIME_MS = intEnv(
 );
 export const COLLABORATION_BACKEND_BASE_URL =
   process.env.COLLABORATION_BACKEND_BASE_URL || 'http://app-dev:8000';
+// The name of the backend's session cookie (`SESSION_COOKIE_NAME` on the
+// Django side, `docs_sessionid` there too). It decides whether
+// `authenticate` has to ask the backend who a caller is at all: the backend
+// only ever speaks sessions through that one cookie, so a `Cookie` header
+// carrying others (csrf, consent, …) but not this one can only resolve to the
+// anonymous identity — the `users/me` call would answer 401 — and is answered
+// anonymously without the roundtrip. Not read from the environment: a
+// two-party contract, hardcoded like the audiences.
+export const SESSION_COOKIE_NAME = 'docs_sessionid';
 export const allowedOrigins = (
   process.env.COLLABORATION_SERVER_ORIGIN || 'http://localhost:3000'
 ).split(',');

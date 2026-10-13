@@ -33,6 +33,7 @@ import {
   BACKEND_TOKEN_LIFETIME_S,
   BACKEND_TOKEN_MARGIN_MS,
   COLLABORATION_BACKEND_BASE_URL,
+  SESSION_COOKIE_NAME,
   Y_PROVIDER_API_KEY,
   YHUB_JWT_PRIVATE_KEY,
 } from './config.js';
@@ -46,6 +47,16 @@ export interface BackendUser {
 export interface BackendDocument {
   abilities?: DocumentAbilities;
 }
+
+// Whether a caller's `Cookie` header carries the backend's session cookie.
+// The backend only ever speaks sessions through that one cookie, so a header
+// carrying others (csrf, consent, …) but not this one can only resolve to the
+// anonymous identity — the `users/me` call would answer 401 — and
+// `authenticate` answers it as such without the roundtrip.
+export const carriesSessionCookie = (cookieHeader: string): boolean =>
+  cookieHeader
+    .split(';')
+    .some((pair) => pair.split('=')[0].trim() === SESSION_COOKIE_NAME);
 
 const touchLog = logger.child({ module: 'updated-at-notifier' });
 

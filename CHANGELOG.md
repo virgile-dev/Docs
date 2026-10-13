@@ -13,6 +13,7 @@ and this project adheres to
 
 ### Changed
 
+- ⚡️(yhub) skip the `users/me` call for callers without a session cookie
 - 🔧(helm) allow to set the period and failure threshold of probes
 
 ### Fixed

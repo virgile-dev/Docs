@@ -30,7 +30,9 @@ It is not a fork of yhub — it is a thin wrapper, written in TypeScript under
   below),
 - plugs in an auth plugin that resolves users and per-document access rights
   by calling the Docs Django backend (`/api/v1.0/users/me/` and
-  `/api/v1.0/documents/{id}/`),
+  `/api/v1.0/documents/{id}/`; the user call is skipped for any caller whose
+  `Cookie` header does not carry the backend's `docs_sessionid` cookie —
+  they can only be anonymous),
 - serves every route under the `/collaboration/` prefix
   (`server.apiPrefix`), including the websocket sync route
   `/collaboration/ws/v1/{org}/{docid}`,
@@ -200,6 +202,13 @@ the userid `anonymous`, which is what lets them edit a public document at all:
 yhub refuses the upgrade of a caller that holds the write but has no identity,
 because attributions carry the userid. Every anonymous edit is therefore
 attributed to that one shared author.
+
+A caller whose `Cookie` header does not carry the backend's session cookie
+(`docs_sessionid`) is anonymous without a roundtrip: the backend only ever
+speaks sessions through that one cookie, so the `users/me` call could only
+answer 401 for them, and the identity is resolved locally instead. Browsers
+still send their other cookies (csrf, consent, …) on that header, which is why
+the check is on the session cookie rather than on the header being present.
 
 ### Origins and cors
 

@@ -172,6 +172,55 @@ describe('backendFetch', () => {
   });
 });
 
+describe('carriesSessionCookie', () => {
+  // imported lazily per test through `load()` like the other describes, so it
+  // runs after the file-level beforeEach has stubbed the env: a beforeAll on
+  // the describe would import config.ts before the first beforeEach runs, and
+  // only pass while every config read keeps a default
+
+  it('accepts a header carrying only the session cookie', async () => {
+    const { carriesSessionCookie } = await load();
+    expect(carriesSessionCookie('docs_sessionid=abc')).toBe(true);
+  });
+
+  it('accepts the session cookie among others', async () => {
+    const { carriesSessionCookie } = await load();
+    expect(
+      carriesSessionCookie('csrftoken=x; docs_sessionid=abc; consent=y'),
+    ).toBe(true);
+  });
+
+  it('accepts it despite surrounding whitespace around the pair', async () => {
+    // browsers separate cookies with "; " and may pad: the name is trimmed,
+    // though it stays case-sensitive — RFC 6265 cookie names are
+    const { carriesSessionCookie } = await load();
+    expect(carriesSessionCookie('csrftoken=x; docs_sessionid = abc')).toBe(
+      true,
+    );
+  });
+
+  it('is case-sensitive on the cookie name, as RFC 6265 makes them', async () => {
+    const { carriesSessionCookie } = await load();
+    expect(carriesSessionCookie('DOCS_SESSIONID=abc')).toBe(false);
+  });
+
+  it('refuses a header with other cookies but no session one', async () => {
+    const { carriesSessionCookie } = await load();
+    expect(carriesSessionCookie('csrftoken=x; consent=y')).toBe(false);
+  });
+
+  it('refuses lookalike names that are not the session cookie', async () => {
+    const { carriesSessionCookie } = await load();
+    expect(carriesSessionCookie('xdocs_sessionid=abc')).toBe(false);
+    expect(carriesSessionCookie('docs_sessionid_extra=abc')).toBe(false);
+  });
+
+  it('refuses an empty header', async () => {
+    const { carriesSessionCookie } = await load();
+    expect(carriesSessionCookie('')).toBe(false);
+  });
+});
+
 describe('the backend signing key', () => {
   it('publishes no JWK when YHUB_JWT_PRIVATE_KEY is unset', async () => {
     const { backendPublicJwk } = await load();

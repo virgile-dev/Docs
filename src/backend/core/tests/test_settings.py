@@ -5,9 +5,24 @@ Unit tests for the User model
 import os
 import tempfile
 
+from django.conf import settings
+
 import pytest
 
 from impress.settings import Base, Production
+
+
+def test_session_cookie_name_matches_yhub_contract():
+    """
+    The yhub collaboration server (`src/yhub-server/src/config.ts`) hardcodes
+    the same session cookie name to decide whether a caller may hold a session
+    at all: a caller whose cookies carry no `docs_sessionid` is resolved to
+    anonymous there without calling `users/me`. Renaming the cookie on the
+    backend side alone would silently degrade every signed-in user to
+    anonymous, so the contract is pinned on both ends.
+    """
+
+    assert settings.SESSION_COOKIE_NAME == "docs_sessionid"
 
 
 def test_invalid_settings_oidc_email_configuration():

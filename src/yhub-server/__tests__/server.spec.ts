@@ -204,3 +204,63 @@ describe('the S3 persistence plugin', () => {
     await expect(boot()).rejects.toThrow(/must be http:\/\/ or https:\/\//);
   });
 });
+
+describe('the authenticate cookie gate', () => {
+  // backend.ts is NOT mocked here: the spy on `fetch` observes the real
+  // `backendFetch`, so these pin what the auth plugin wires together — who
+  // is resolved locally, and who costs a backend call. Each test re-boots
+  // through boot(), after the file-level beforeEach has stubbed BASE_ENV.
+  const request = (
+    headers: Record<string, string>,
+    url = '/collaboration/ydoc/v1/docs/00000000-0000-4000-8000-000000000000/',
+  ) => ({
+    getHeader: (name: string) => headers[name] ?? '',
+    getUrl: () => url,
+  });
+
+  const bootGate = async (): Promise<{
+    authenticate: (req: ReturnType<typeof request>) => Promise<unknown>;
+    fetchMock: ReturnType<typeof vi.fn>;
+  }> => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await boot();
+    expect(createYHub.lastConfig.server).not.toBeNull();
+    return {
+      authenticate: createYHub.lastConfig.server.auth.authenticate,
+      fetchMock,
+    };
+  };
+
+  it('resolves a caller holding other cookies but no session one to anonymous, without calling the backend', async () => {
+    const { authenticate, fetchMock } = await bootGate();
+
+    const user = await authenticate(
+      request({ cookie: 'csrftoken=x; consent=y' }),
+    );
+
+    expect(user).toMatchObject({ userid: 'anonymous' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('still asks the backend who a caller carrying the session cookie is', async () => {
+    const { authenticate, fetchMock } = await bootGate();
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'user-1' }),
+    });
+
+    const user = await authenticate(
+      request({ cookie: 'csrftoken=x; docs_sessionid=abc' }),
+    );
+
+    expect(user).toMatchObject({ userid: 'user-1' });
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'http://app-dev:8000/api/v1.0/users/me/',
+    );
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      cookie: 'csrftoken=x; docs_sessionid=abc',
+    });
+  });
+});

@@ -12,7 +12,12 @@ import { jwtVerify } from 'jose';
 import { api } from './api.js';
 // outbound calls to the Docs Django backend, and the keys both ends verify with
 import type { BackendDocument, BackendUser } from './backend.js';
-import { JWKS, backendFetch, touchDocument } from './backend.js';
+import {
+  JWKS,
+  backendFetch,
+  carriesSessionCookie,
+  touchDocument,
+} from './backend.js';
 import {
   ANONYMOUS_USERID,
   API_PREFIX,
@@ -192,9 +197,16 @@ const auth = createAuthPlugin<AppAuthInfo>({
     // `Origin` header at all, so on a deployment where the page and /collaboration/ share a
     // host every round would 401 while the PATCH beside it succeeded.
     //
-    // A caller with no cookie at all is anonymous too: the probes arrive that way, and so does
-    // a public document opened in a fresh browser. What they may do is `authorize`'s answer.
-    if (!cookie) {
+    // The backend only ever speaks sessions through its one session cookie
+    // (`docs_sessionid`): a caller whose `Cookie` header does not carry it can
+    // only resolve to the anonymous identity, and is answered as such without
+    // the `users/me` roundtrip. This is not just the cookie-less case — the
+    // probes and a public document in a fresh browser — but every signed-out
+    // tab: since the backend stopped forcing a session onto anonymous users,
+    // they hold no `docs_sessionid` at all, and browsers still send their other
+    // cookies (csrf, consent, …) on this header. What an anonymous caller may
+    // do is `authorize`'s answer, as before.
+    if (!carriesSessionCookie(cookie)) {
       return { userid: ANONYMOUS_USERID, origin, endpoint };
     }
     try {
