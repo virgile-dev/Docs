@@ -25,6 +25,12 @@ and this project adheres to
 
 - ♿️(frontend) fix the accessibility of the document tree #2769
 
+### Removed
+
+- 🔥(backend) remove `ForceSessionMiddleware`, an orphan of the removed
+  non-websocket save safeguard
+
+
 ## [v6.0.0] - 2026-10-05
 
 ### Added
