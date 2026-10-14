@@ -35,7 +35,7 @@ test.describe('Doc grid move', () => {
       browserName,
       1,
     );
-    await page.getByRole('button', { name: 'Back to homepage' }).click();
+    await page.getByRole('link', { name: 'Back to homepage' }).click();
 
     const draggableRow = await getGridRow(page, draggableTitle);
     const droppableRow = await getGridRow(page, droppableTitle);
@@ -196,10 +196,10 @@ test.describe('Doc grid move', () => {
       .getByRole('button', { name: 'close' })
       .click();
 
-    await page.getByRole('button', { name: 'Back to homepage' }).click();
+    await page.getByRole('link', { name: 'Back to homepage' }).click();
 
     const [titleDoc2] = await createDoc(page, 'Droppable doc', browserName, 1);
-    await page.getByRole('button', { name: 'Back to homepage' }).click();
+    await page.getByRole('link', { name: 'Back to homepage' }).click();
 
     const docsGrid = page.getByTestId('docs-grid');
     await expect(docsGrid.getByText(titleDoc1)).toBeVisible();
@@ -287,7 +287,7 @@ test.describe('Doc grid move', () => {
 
     await page.waitForTimeout(1000);
 
-    await page.getByRole('button', { name: 'Back to homepage' }).click();
+    await page.getByRole('link', { name: 'Back to homepage' }).click();
 
     const docsGrid = page.getByTestId('docs-grid');
     await expect(docsGrid.getByText(titleDoc1)).toBeVisible();

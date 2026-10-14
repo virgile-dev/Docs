@@ -236,10 +236,8 @@ export const goToGridDoc = async (
   page: Page,
   { nthRow = 1, title }: GoToGridDocOptions = {},
 ) => {
-  if (
-    await page.getByRole('button', { name: 'Back to homepage' }).isVisible()
-  ) {
-    await page.getByRole('button', { name: 'Back to homepage' }).click();
+  if (await page.getByRole('link', { name: 'Back to homepage' }).isVisible()) {
+    await page.getByRole('link', { name: 'Back to homepage' }).click();
   }
 
   const docsGrid = page.getByTestId('docs-grid');

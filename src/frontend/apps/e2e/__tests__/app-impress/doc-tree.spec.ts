@@ -282,7 +282,7 @@ test.describe('Doc Tree', () => {
 
     await verifyDocName(page, docParent);
 
-    await page.getByRole('button', { name: 'Back to homepage' }).click();
+    await page.getByRole('link', { name: 'Back to homepage' }).click();
     await expect(page.getByText(docChild)).toBeVisible();
   });
 
