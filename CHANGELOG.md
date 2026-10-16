@@ -28,6 +28,7 @@ and this project adheres to
   writes #2840
 - 🐛(backend) enforce resource server action restrictions on the external 
   API #2745
+- 🐛(backend) mark only the top duplicate as a copy, after its title #2855
 
 ## [v6.0.1] - 2026-10-15
 
