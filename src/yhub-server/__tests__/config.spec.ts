@@ -25,6 +25,7 @@ beforeEach(() => {
     'YHUB_TASK_DEBOUNCE_MS',
     'YHUB_MIN_MESSAGE_LIFETIME_MS',
     'YHUB_BACKEND_REQUEST_TIMEOUT_MS',
+    'YHUB_AUTH_TIMEOUT_MS',
     'YHUB_IDENTITY_CACHE_TTL_MS',
     'YHUB_ABILITIES_CACHE_TTL_MS',
     'YHUB_ACCESS_CACHE_TTL_MS',
@@ -116,6 +117,28 @@ describe('the numeric tuning knobs', () => {
     vi.resetModules();
     vi.stubEnv('YHUB_BACKEND_REQUEST_TIMEOUT_MS', '5s');
     await expect(load()).rejects.toThrow(/YHUB_BACKEND_REQUEST_TIMEOUT_MS/);
+  });
+
+  it('gives the auth hooks 30s, above the 10s yhub 0.10 defaults to', async () => {
+    // `authorize` chains two backend calls and the 10s S3 fetch of a legacy
+    // seed: yhub's own default would cut a slow seed short
+    const { AUTH_TIMEOUT_MS } = await load();
+    expect(AUTH_TIMEOUT_MS).toBe(30000);
+
+    vi.resetModules();
+    vi.stubEnv('YHUB_AUTH_TIMEOUT_MS', '45000');
+    expect((await load()).AUTH_TIMEOUT_MS).toBe(45000);
+  });
+
+  it('refuses an auth timeout that is not a positive whole number of ms', async () => {
+    vi.stubEnv('YHUB_AUTH_TIMEOUT_MS', '0');
+    await expect(load()).rejects.toThrow(
+      /YHUB_AUTH_TIMEOUT_MS must be an integer >= 1/,
+    );
+
+    vi.resetModules();
+    vi.stubEnv('YHUB_AUTH_TIMEOUT_MS', '30s');
+    await expect(load()).rejects.toThrow(/YHUB_AUTH_TIMEOUT_MS/);
   });
 });
 

@@ -274,6 +274,7 @@ were configurable:
 | `YHUB_TASK_DEBOUNCE_MS` | `10000` | How long an update waits on the stream before a worker persists it |
 | `YHUB_MIN_MESSAGE_LIFETIME_MS` | `60000` | How long persisted updates stay replayable from redis |
 | `YHUB_BACKEND_REQUEST_TIMEOUT_MS` | `5000` | How long a call to the Docs backend may take before it is given up on |
+| `YHUB_AUTH_TIMEOUT_MS` | `30000` | How long yhub waits for `authenticate` or `authorize` as a whole (backend calls, legacy seed) before it answers 503; raise it with `YHUB_BACKEND_REQUEST_TIMEOUT_MS` |
 | `YHUB_IDENTITY_CACHE_TTL_MS` | `0` | How long a resolved `users/me` identity is reused for the same Cookie header (authz cache, off by default) |
 | `YHUB_ABILITIES_CACHE_TTL_MS` | `0` | How long a `documents/{id}` verdict is served from cache before it is re-read (deleted by `reset-connections`, see the authz-cache section) |
 | `YHUB_ACCESS_CACHE_TTL_MS` | `0` | How long an `accesses/me` date is served from cache before it is re-read |

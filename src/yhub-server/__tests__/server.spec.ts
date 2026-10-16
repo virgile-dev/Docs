@@ -107,6 +107,7 @@ beforeEach(() => {
     'YHUB_TASK_DEBOUNCE_MS',
     'YHUB_MIN_MESSAGE_LIFETIME_MS',
     'YHUB_BACKEND_REQUEST_TIMEOUT_MS',
+    'YHUB_AUTH_TIMEOUT_MS',
     'YHUB_S3_PERSISTENCE',
     'YHUB_S3_ENDPOINT_URL',
     'YHUB_S3_ACCESS_KEY_ID',
@@ -143,6 +144,19 @@ describe('a valid, minimal environment', () => {
     expect(redis.taskDebounce).toBe(10000);
     expect(redis.minMessageLifetime).toBe(60000);
     expect(worker.taskConcurrency).toBe(5);
+  });
+
+  it('hands yhub our auth timeout rather than leaving its 10s default', async () => {
+    // yhub 0.10 abandons an auth hook after `server.authTimeout`; left unset,
+    // a legacy seed slower than 10s would refuse the connection it serves
+    await boot();
+    expect(createYHub.lastConfig.server.authTimeout).toBe(30000);
+  });
+
+  it('threads YHUB_AUTH_TIMEOUT_MS into the yhub config', async () => {
+    vi.stubEnv('YHUB_AUTH_TIMEOUT_MS', '45000');
+    await boot();
+    expect(createYHub.lastConfig.server.authTimeout).toBe(45000);
   });
 });
 
@@ -341,5 +355,23 @@ describe('the authorize authz-cache wiring', () => {
       authorize('document', { org: 'docs', docid, branch: 'main' }, user('u1')),
     ).resolves.toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('denies the org scope, which closes yhub 0.10’s updated-documents listing', async () => {
+    // `GET /updated/v1/{org}` is authorized against the org scope: a plugin
+    // that answered it would list every changed document id of the org
+    const { authorize, fetchMock } = await bootAuthorize();
+    // the org scope's resource is the org name, not a docRef
+    const authorizeOrg = authorize as unknown as (
+      scope: 'org',
+      org: string,
+      user: unknown,
+    ) => Promise<unknown>;
+
+    await expect(authorizeOrg('org', 'docs', user('u1'))).resolves.toBeNull();
+    await expect(
+      authorizeOrg('org', 'docs', { userid: 'system', admin: true }),
+    ).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

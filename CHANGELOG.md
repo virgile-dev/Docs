@@ -14,6 +14,7 @@ and this project adheres to
 
 - ♻️(frontend) replace outdated AGPL mentions of BlockNote XL packages #2775
 - 💄(frontend) update upload loader and error ui #2778
+- ⬆️(yhub) upgrade @y/hub to 0.10.1 #2853
 
 ## [v6.0.1] - 2026-10-15
 

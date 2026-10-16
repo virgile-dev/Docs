@@ -1189,6 +1189,7 @@ yhub:
   ## @extra yhub.envVars.YHUB_TASK_DEBOUNCE_MS How long an update waits on the redis stream before a worker persists it, in ms (default: 10000)
   ## @extra yhub.envVars.YHUB_MIN_MESSAGE_LIFETIME_MS How long persisted updates stay replayable from redis, in ms (default: 60000)
   ## @extra yhub.envVars.YHUB_BACKEND_REQUEST_TIMEOUT_MS How long a call to the backend may take before yhub gives up on it and tells the caller to retry, in ms (default: 5000)
+  ## @extra yhub.envVars.YHUB_AUTH_TIMEOUT_MS How long yhub waits for the whole authentication of a connection or request (backend calls and legacy seed) before it tells the caller to retry, in ms (default: 30000)
   ## @extra yhub.envVars.YHUB_IDENTITY_CACHE_TTL_MS How long a resolved identity is reused for the same session cookie, in ms; 0 disables this layer (default)
   ## @extra yhub.envVars.YHUB_ABILITIES_CACHE_TTL_MS How long a document abilities verdict is served from cache, in ms, before it is re-read; deleted cluster-wide by the reset-connections kick; 0 disables it
   ## @extra yhub.envVars.YHUB_ACCESS_CACHE_TTL_MS How long an access date (the history bound) is served from cache, in ms; 0 disables it (default)

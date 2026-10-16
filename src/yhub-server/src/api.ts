@@ -15,12 +15,12 @@ import {
   createDocumentPermissions,
   logger,
 } from '@y/hub';
+import * as Y from '@y/y';
 
 import { backendPublicJwk } from './backend.js';
 import { invalidateDocumentAuthz } from './authz-cache.js';
 import {
   EMPTY_UPDATE_MAX_BYTES,
-  EMPTY_YDOC,
   MAX_CREATE_BYTES,
   ORG,
   READINESS_TIMEOUT_MS,
@@ -69,6 +69,30 @@ const eraseContent = async (
 ): Promise<void> => {
   await yhubApi.deleteDoc(docRef, { hard: true, by });
   await yhubApi.persistence.deleteTombstone(docRef);
+};
+
+// The contentmap yhub's own `PATCH ydoc` stamps on an update (its
+// `createContentMap`, which the package does not export): every id the update
+// inserts or deletes, attributed to `userid` at this moment. The insertAt is
+// what gives the seeded content its entry in the activity timeline.
+const attributeTo = (
+  contentids: Y.ContentIds,
+  userid: string,
+): Uint8Array<ArrayBuffer> => {
+  const now = Date.now();
+  return Y.encodeContentMap(
+    Y.createContentMapFromContentIds(
+      contentids,
+      [
+        Y.createContentAttribute('insert', userid),
+        Y.createContentAttribute('insertAt', now),
+      ],
+      [
+        Y.createContentAttribute('delete', userid),
+        Y.createContentAttribute('deleteAt', now),
+      ],
+    ),
+  );
 };
 
 const readyLog = logger.child({ module: 'readiness' });
@@ -272,7 +296,7 @@ export const api = [
           return jsonResponse(400, { error: 'Unknown branch' });
         }
         const body = await req.bytes();
-        // req.bytes() resolves to a Node Buffer, but the compute-task schema
+        // req.bytes() resolves to a Node Buffer, but the stream-message schema
         // requires an exact Uint8Array (lib0 $constructedBy compares the
         // constructor) — re-view the same bytes without copying
         const update = new Uint8Array(
@@ -286,8 +310,8 @@ export const api = [
           // ("HTTP/1.1 413 ") — legal, and callers switch on the code
           return jsonResponse(413, { error: 'Update too large' });
         }
-        // yhub's "no effective content" convention — reject before it reaches
-        // a worker
+        // yhub's "no effective content" convention — reject before reading the
+        // room
         if (update.byteLength <= EMPTY_UPDATE_MAX_BYTES) {
           return jsonResponse(400, { error: 'Empty update' });
         }
@@ -316,38 +340,32 @@ export const api = [
         const userid =
           (authInfo.admin === true && req.headers['x-user-id']) ||
           authInfo.userid;
-        let result;
+        let contentids: Y.ContentIds;
         try {
-          // diffs the posted update against the (empty) current doc and
-          // stamps the attribution contentmap
-          result = await req.yhub.computePool.patchYdoc(
-            {
-              update,
-              currentDoc: gcDoc ?? EMPTY_YDOC,
-              userid,
-              customAttributions: [],
-            },
-            { docRef: req.docRef },
-          );
+          // The structural scan yhub runs on an update before appending it, on
+          // the socket and in its own PATCH: a malformed or truncated update
+          // throws here. It used to be the compute worker's `patchYdoc` that
+          // threw, until yhub 0.9.1 removed it and started appending updates
+          // as they come. The update is the only untrusted input here, so a
+          // throw maps to 400; getDoc / addMessage failures stay generic 500s.
+          contentids = Y.createContentIdsFromUpdate(update);
         } catch {
-          // a malformed update makes the compute worker throw (yhub logs
-          // 'worker failed' and replaces the thread). The update is the only
-          // untrusted input here, so a rejection maps to 400; getDoc /
-          // addMessage failures stay generic 500s.
           return jsonResponse(400, { error: 'Invalid Yjs update' });
         }
-        if (result == null) {
-          // structurally valid but no effective content (e.g. delete-set
-          // only). A "successful" create that leaves the room nonexistent
-          // would lie to the caller — a later create would not 409.
+        if (contentids.inserts.clients.size === 0) {
+          // structurally valid but no content (e.g. delete-set only). A
+          // "successful" create that leaves the room nonexistent would lie to
+          // the caller — a later create would not 409.
           return jsonResponse(400, { error: 'Empty update' });
         }
-        // on a fresh room this creates the stream, schedules compaction, and
-        // fans out to any live subscribers — nothing else to do
+        // Appended as posted, which is what yhub's PATCH does since 0.9.1: the
+        // room was checked empty above, so there is nothing to diff it against.
+        // On a fresh room this creates the stream, schedules compaction, and
+        // fans out to any live subscribers — nothing else to do.
         await req.yhub.stream.addMessage(req.docRef, {
           type: 'ydoc:update:v1',
-          contentmap: result.contentmap,
-          update: result.update,
+          contentmap: attributeTo(contentids, userid),
+          update,
         });
         return jsonResponse(201, { message: 'Document created' });
       },

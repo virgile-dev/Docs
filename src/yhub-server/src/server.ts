@@ -23,6 +23,7 @@ import {
 import {
   ANONYMOUS_USERID,
   API_PREFIX,
+  AUTH_TIMEOUT_MS,
   BACKEND_REQUEST_TIMEOUT_MS,
   MIN_MESSAGE_LIFETIME_MS,
   ORG,
@@ -468,6 +469,9 @@ const yhub: YHub = (await createYHub({
         // on a cross-origin `fetch`; it is also why the list has to be concrete, browsers
         // refusing "*" together with Access-Control-Allow-Credentials.
         cors: { origin: allowedOrigins, credentials: true },
+        // see AUTH_TIMEOUT_MS: yhub's own default is shorter than the legacy
+        // seed `authorize` may legitimately wait on
+        authTimeout: AUTH_TIMEOUT_MS,
       }
     : null,
   worker: RUNS_WORKER
@@ -502,6 +506,7 @@ logger.info(
     taskDebounceMs: yhub.stream.taskDebounce,
     minMessageLifetimeMs: yhub.stream.minMessageLifetime,
     backendRequestTimeoutMs: BACKEND_REQUEST_TIMEOUT_MS,
+    authTimeoutMs: RUNS_SERVER ? AUTH_TIMEOUT_MS : null,
   },
   'yhub configuration',
 );

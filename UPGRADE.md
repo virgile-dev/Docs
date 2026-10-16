@@ -16,6 +16,21 @@ the following command inside your docker container:
 
 ## [Unreleased]
 
+- ⚠️ **The collaboration server moves to `@y/hub` 0.10.1: run its schema
+  script again before starting it.** It adds the `yhub_ydoc_versions_v1`
+  table, without which every hard deletion of a document fails, and two
+  indexes. The helm chart's `init-db` job does it on sync (`yhub.initDb`); with
+  docker compose, `make migrate-yhub`. Each index build holds a SHARE lock on
+  its table, which pauses compaction for a few seconds per million rows: run it
+  in a quiet moment.
+- Redis 6.2 or later (or Valkey) is now required by the collaboration server.
+- Roll its workers before its servers when they are deployed apart
+  (`yhub.worker.enabled`). The other order is harmless: a stale entry in a
+  Redis index until the document's next write.
+- yhub now gives up on an authentication that takes longer than
+  `YHUB_AUTH_TIMEOUT_MS` (default 30000) and asks the caller to retry. Raise it
+  along with `YHUB_BACKEND_REQUEST_TIMEOUT_MS`.
+
 ## [6.0.0] - 2026-10-05
 
 ⚠️ This release replaces the collaboration server. The content of a document
