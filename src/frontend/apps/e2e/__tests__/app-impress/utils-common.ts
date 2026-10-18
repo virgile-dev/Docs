@@ -206,7 +206,9 @@ export const verifyDocName = async (page: Page, docName: string) => {
     timeout: 10000,
   });
 
-  await expect(card).toHaveText(new RegExp(docName), {
+  // Escape regex special characters so titles like "Doc (copy)" match literally
+  const escapedDocName = docName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  await expect(card).toHaveText(new RegExp(escapedDocName), {
     timeout: 10000,
   });
 };
