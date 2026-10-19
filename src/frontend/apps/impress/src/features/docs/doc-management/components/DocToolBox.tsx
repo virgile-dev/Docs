@@ -324,6 +324,7 @@ const DocToolBoxComponent = ({
           duplicateDoc({
             docId: doc.id,
             canSave: doc.abilities.partial_update,
+            with_descendants: duplicateWithChildrenAllowed,
           });
         }
       },

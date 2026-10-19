@@ -24,6 +24,7 @@ and this project adheres to
 
 ### Fixed
 
+- 🐛(frontend) don't duplicate children if not allowed #2860
 - 🐛(frontend) wrap long unbroken document titles #2852
 - 🐛(frontend) wrap long text in the print export #2813
 - 🔒️(backend) bind comment thread to the path document on creation #2838
