@@ -63,6 +63,9 @@ export const useDuplicatedDoc = ({
   const { isTopRoot } = useDocUtils(doc);
   const router = useRouter();
   const { toast } = useToastProvider();
+  // The backend duplicates a sub-doc as a sibling only for editors and above.
+  // For a reader, the copy becomes a new root doc, outside of the current tree.
+  const isDuplicateInTree = !isTopRoot && doc.abilities.partial_update;
 
   return useDuplicateDoc({
     onSuccess: (data) => {
@@ -85,6 +88,7 @@ export const useDuplicatedDoc = ({
               duplicatedDocId={data.id}
               originalDocId={doc.id}
               isTopRoot={isTopRoot}
+              isInTree={isDuplicateInTree}
               treeContext={treeContext}
             />
           ),
@@ -92,7 +96,9 @@ export const useDuplicatedDoc = ({
       );
 
       if (!isTopRoot) {
-        addDocToTree(treeContext, doc.id, data);
+        if (isDuplicateInTree) {
+          addDocToTree(treeContext, doc.id, data);
+        }
         void router.push(`/docs/${data.id}`);
       }
     },
@@ -219,12 +225,15 @@ export const ConfirmationDuplicateModal = ({
 
 export const ToastActions = ({
   isTopRoot,
+  isInTree = !isTopRoot,
   onClose,
   duplicatedDocId,
   originalDocId,
   treeContext,
 }: {
   isTopRoot: boolean;
+  /** Whether the duplicated doc was added to the current tree. */
+  isInTree?: boolean;
   onClose?: () => void;
   duplicatedDocId: string;
   originalDocId: string;
@@ -237,12 +246,14 @@ export const ToastActions = ({
     listInvalidQueries: [KEY_LIST_DOC, KEY_LIST_DOC_TRASHBIN],
     options: {
       onSuccess: () => {
-        if (!isTopRoot) {
+        if (isInTree) {
           deleteDocFromTreeAfterNavigate(
             treeContext,
             duplicatedDocId,
             router.push(`/docs/${originalDocId}`),
           );
+        } else if (!isTopRoot) {
+          void router.push(`/docs/${originalDocId}`);
         }
       },
       onError: (error) => {
