@@ -14,7 +14,11 @@ import { Doc, useMoveDoc } from '@/docs/doc-management';
 import { focusMainContentStart } from '@/layouts/utils';
 import { useResponsiveStore } from '@/stores/useResponsiveStore';
 
-import { isDocNode, isWithinTreeItemActions } from '../utils';
+import {
+  addToNumchildInTree,
+  isDocNode,
+  isWithinTreeItemActions,
+} from '../utils';
 
 import { DocSubPageItem } from './DocSubPageItem';
 
@@ -88,9 +92,20 @@ export const DocTreeSubpages = memo(function DocTreeSubpages({
         skipTreeInvalidation: true,
       });
 
+      // The tree holds its own `numchild` of the parents, which the actions
+      // of their item (e.g. duplicate) read. Updated in place and before the
+      // move, as `updateNode` would resurrect the moved doc under its old parent.
+      const rootId = treeContext?.root?.id;
+      const oldParentId = result.oldParentId ?? rootId;
+      const newParentId = result.newParentId ?? rootId;
+      if (oldParentId && newParentId && oldParentId !== newParentId) {
+        addToNumchildInTree(treeContext, oldParentId, -1, { keepFocus: true });
+        addToNumchildInTree(treeContext, newParentId, 1, { keepFocus: true });
+      }
+
       treeContext?.treeData.handleMove(result);
     },
-    [moveDoc, treeContext?.treeData],
+    [moveDoc, treeContext],
   );
 
   const canDrop = useCallback(

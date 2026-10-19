@@ -23,6 +23,7 @@ import { useDuplicatedDoc } from '@/docs/doc-management/components/ConfirmationD
 import { usePresenterStore } from '@/docs/doc-presenter/stores';
 import { useDetachDoc } from '@/docs/doc-tree/api/useDetach';
 import {
+  addToNumchildInTree,
   deleteDocFromTreeAfterNavigate,
   useTreeContextOrNull,
 } from '@/docs/doc-tree/utils';
@@ -476,6 +477,10 @@ const DocToolBoxComponent = ({
             if (isTopParent && isCurrentDoc) {
               void router.push(`/`);
             } else if (parentId) {
+              // In place: `updateNode` would bring back the doc deleted below
+              addToNumchildInTree(treeContext, String(parentId), -1, {
+                keepFocus: true,
+              });
               deleteDocFromTreeAfterNavigate(
                 treeContext,
                 doc.id,
