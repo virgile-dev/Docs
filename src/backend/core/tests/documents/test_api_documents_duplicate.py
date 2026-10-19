@@ -518,13 +518,18 @@ def test_api_documents_duplicate_with_descendants_simple():
         ("🚀 Roadmap", "🚀 Roadmap (copy)"),
         (None, "Untitled document (copy)"),
         ("", "Untitled document (copy)"),
+        ("a" * 248, f"{'a' * 248} (copy)"),
+        ("a" * 249, f"{'a' * 245}... (copy)"),
+        ("a" * 255, f"{'a' * 245}... (copy)"),
+        (f"{'a' * 244} {'b' * 10}", f"{'a' * 244}... (copy)"),
     ],
 )
 def test_api_documents_duplicate_title(title, expected_title):
     """
     The duplicate is marked as a copy at the end of its title, so that a leading
     emoji, used as the document icon, stays first. An untitled document gets a
-    title saying it is a copy.
+    title saying it is a copy. A title too long to be marked within the maximum
+    length of a title is truncated, with an ellipsis, before the copy marker.
     """
     user = factories.UserFactory()
     client = APIClient()

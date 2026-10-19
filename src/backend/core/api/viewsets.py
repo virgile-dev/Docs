@@ -1407,6 +1407,26 @@ class DocumentViewSet(
 
         return drf_response.Response(serializer.data, status=status.HTTP_201_CREATED)
 
+    @staticmethod
+    def _get_copy_title(title):
+        """
+        Return the title of a copy of a document titled `title`.
+
+        The title of the copy is marked as a copy at its end. If it then exceeds
+        the maximum length of a title, the original title is truncated, with an
+        ellipsis, so that the copy marker is kept.
+        """
+        max_length = models.Document._meta.get_field("title").max_length  # noqa: SLF001
+        copy_title = _("{title} (copy)").format(title=title)
+        excess = len(copy_title) - max_length
+        if excess <= 0:
+            return copy_title
+
+        ellipsis = "..."
+        kept_length = max(len(title) - excess - len(ellipsis), 0)
+        truncated_title = f"{title[:kept_length].rstrip()}{ellipsis}"
+        return _("{title} (copy)").format(title=truncated_title)[:max_length]
+
     def _duplicate_document_structure(
         self,
         document_to_duplicate,
@@ -1454,7 +1474,7 @@ class DocumentViewSet(
             # Only the top duplicate is marked as a copy, at the end of its title
             # so that a leading emoji, used as the document icon, stays first.
             title = (
-                _("{title} (copy)").format(title=document_to_duplicate.title)
+                self._get_copy_title(document_to_duplicate.title)
                 if document_to_duplicate.title
                 else _("Untitled document (copy)")
             )
