@@ -471,6 +471,11 @@ class Base(Configuration):
                 environ_name="API_DOCUMENT_THROTTLE_RATE",
                 environ_prefix=None,
             ),
+            "media_auth": values.Value(
+                default="200/minute",
+                environ_name="API_MEDIA_AUTH_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
             "document_access": values.Value(
                 default="50/minute",
                 environ_name="API_DOCUMENT_ACCESS_THROTTLE_RATE",
