@@ -1,5 +1,8 @@
 # Django impress
 
+# ---- uv, the single place where its version is set ----
+FROM ghcr.io/astral-sh/uv:0.13.4 AS uv
+
 # ---- base image to inherit from ----
 FROM python:3.14.8-alpine AS base
 
@@ -21,7 +24,7 @@ ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_DOWNLOADS=0
 
 # install uv
-COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /bin/
+COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
 
@@ -131,7 +134,7 @@ USER root:root
 RUN apk add --no-cache postgresql-client
 
 # Install development dependencies
-RUN --mount=from=ghcr.io/astral-sh/uv:0.12.23,source=/uv,target=/bin/uv \
+RUN --mount=from=uv,source=/uv,target=/bin/uv \
   uv sync --all-extras --locked
 
 # Restore the un-privileged user running the application
