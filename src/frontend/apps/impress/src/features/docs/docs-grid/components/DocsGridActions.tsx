@@ -1,77 +1,122 @@
-import { useModal } from '@openfun/cunningham-react';
+import {
+  ButtonProps,
+  DropdownMenuItem,
+  VariantType,
+} from '@gouvfr-lasuite/ui-components';
 import { useTranslation } from 'react-i18next';
 
-import { DropdownMenu, DropdownMenuOption, Icon } from '@/components';
+import { Icon } from '@/components/Icon';
 import {
-  Doc,
+  type Doc,
   KEY_LIST_DOC,
-  ModalRemoveDoc,
-  useCreateFavoriteDoc,
-  useDeleteFavoriteDoc,
-} from '@/features/docs/doc-management';
+  KEY_LIST_FAVORITE_DOC,
+  useRestoreDoc,
+} from '@/docs/doc-management';
+import { DocToolBox } from '@/docs/doc-management/components/DocToolBox';
+import { useToast } from '@/hooks';
+import MoreIcon from '@/icons/more_horiz.svg';
+
+import { KEY_LIST_DOC_TRASHBIN } from '../api';
 
 interface DocsGridActionsProps {
   doc: Doc;
-  openShareModal?: () => void;
+  isInTrashbin?: boolean;
 }
+
+const TOOLBOX_BUTTON_PROPS: ButtonProps = {
+  icon: <MoreIcon width={16} height={16} aria-hidden="true" />,
+  size: 'nano',
+};
 
 export const DocsGridActions = ({
   doc,
-  openShareModal,
+  isInTrashbin,
 }: DocsGridActionsProps) => {
+  return isInTrashbin ? (
+    <DocsGridTrashbinActions doc={doc} />
+  ) : (
+    <DocToolBox
+      doc={doc}
+      isCurrentDoc={false}
+      buttonProps={TOOLBOX_BUTTON_PROPS}
+    />
+  );
+};
+
+interface DocsGridTrashbinActionsProps {
+  doc: Doc;
+}
+
+export const DocsGridTrashbinActions = ({
+  doc,
+}: DocsGridTrashbinActionsProps) => {
   const { t } = useTranslation();
-  const deleteModal = useModal();
-
-  const removeFavoriteDoc = useDeleteFavoriteDoc({
-    listInvalideQueries: [KEY_LIST_DOC],
-  });
-  const makeFavoriteDoc = useCreateFavoriteDoc({
-    listInvalideQueries: [KEY_LIST_DOC],
-  });
-
-  const options: DropdownMenuOption[] = [
-    {
-      label: doc.is_favorite ? t('Unpin') : t('Pin'),
-      icon: 'push_pin',
-      callback: () => {
-        if (doc.is_favorite) {
-          removeFavoriteDoc.mutate({ id: doc.id });
-        } else {
-          makeFavoriteDoc.mutate({ id: doc.id });
-        }
+  const { toast } = useToast();
+  const { mutate: restoreDoc } = useRestoreDoc({
+    listInvalidQueries: [
+      KEY_LIST_DOC,
+      KEY_LIST_DOC_TRASHBIN,
+      KEY_LIST_FAVORITE_DOC,
+    ],
+    options: {
+      onSuccess: (_data) => {
+        toast(
+          t('The document has been restored.', {
+            description: 'Toast shown after a deleted document is restored',
+          }),
+          VariantType.SUCCESS,
+          {
+            duration: 4000,
+          },
+        );
       },
-      testId: `docs-grid-actions-${doc.is_favorite ? 'unpin' : 'pin'}-${doc.id}`,
+      onError: (error) => {
+        toast(
+          t('An error occurred while restoring the document: {{error}}', {
+            description: 'Toast shown when restoring a deleted document fails',
+            error: error?.message,
+          }),
+          VariantType.ERROR,
+          {
+            duration: 4000,
+          },
+        );
+      },
     },
-    {
-      label: t('Share'),
-      icon: 'group',
-      callback: () => openShareModal?.(),
-      testId: `docs-grid-actions-share-${doc.id}`,
-    },
+  });
 
+  if (!doc.abilities.restore) {
+    return null;
+  }
+
+  const options: DropdownMenuItem[] = [
     {
-      label: t('Remove'),
-      icon: 'delete',
-      callback: () => deleteModal.open(),
-      disabled: !doc.abilities.destroy,
-      testId: `docs-grid-actions-remove-${doc.id}`,
+      label: t('Restore', {
+        description: 'Button to restore a deleted document or an older version',
+      }),
+      icon: (
+        <Icon
+          $size="20px"
+          iconName="undo"
+          aria-hidden="true"
+          variant="symbols-outlined"
+        />
+      ),
+      callback: () => {
+        restoreDoc({
+          docId: doc.id,
+        });
+      },
+      testId: `docs-grid-actions-restore-${doc.id}`,
     },
   ];
 
   return (
-    <>
-      <DropdownMenu options={options}>
-        <Icon
-          data-testid={`docs-grid-actions-button-${doc.id}`}
-          iconName="more_horiz"
-          $theme="primary"
-          $variation="600"
-        />
-      </DropdownMenu>
-
-      {deleteModal.isOpen && (
-        <ModalRemoveDoc onClose={deleteModal.onClose} doc={doc} />
-      )}
-    </>
+    <DocToolBox
+      doc={doc}
+      isCurrentDoc={false}
+      buttonProps={TOOLBOX_BUTTON_PROPS}
+      optionsDefault={options}
+    />
   );
 };

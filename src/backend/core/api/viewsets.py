@@ -1,58 +1,111 @@
 """API endpoints"""
+
 # pylint: disable=too-many-lines
 
+import ipaddress
+import json
 import logging
-import re
+import socket
 import uuid
-from urllib.parse import urlparse
+from collections import defaultdict
+from functools import partial
+from urllib.parse import unquote, urlencode, urlparse
 
 from django.conf import settings
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.contrib.postgres.search import TrigramSimilarity
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
+from django.core.validators import URLValidator
+from django.db import DatabaseError, transaction
 from django.db import models as db
-from django.db.models import (
-    Count,
-    Exists,
-    OuterRef,
-    Q,
-    Subquery,
-    Value,
-)
-from django.http import Http404
+from django.db.models.expressions import RawSQL
+from django.db.models.functions import Greatest, Left, Length
+from django.http import Http404, StreamingHttpResponse
+from django.urls import reverse
+from django.utils import timezone
+from django.utils.functional import cached_property
+from django.utils.http import content_disposition_header
+from django.utils.text import slugify
+from django.utils.translation import gettext_lazy as _
 
+import requests
 import rest_framework as drf
+import waffle
 from botocore.exceptions import ClientError
-from django_filters import rest_framework as drf_filters
-from rest_framework import filters, status
+from csp.constants import NONE
+from csp.decorators import csp_update
+from lasuite.malware_detection import malware_detection
+from lasuite.tools.email import get_domain_from_email
+from pydantic import ValidationError as PydanticValidationError
+from rest_framework import filters, status, viewsets
 from rest_framework import response as drf_response
 from rest_framework.permissions import AllowAny
+from rest_framework.views import APIView
+from treebeard.exceptions import InvalidMoveToDescendant
 
-from core import authentication, enums, models
-from core.services.ai_services import AIService
-from core.services.collaboration_services import CollaborationService
+from core import authentication, choices, enums, models
+from core.api.filters import remove_accents
+from core.services import mime_types
+from core.services.ai_services.blocknote import AIService
+from core.services.ai_services.legacy import get_legacy_ai_service
+from core.services.converter_services import (
+    ConversionError,
+    Converter,
+)
+from core.services.converter_services import (
+    ServiceUnavailableError as YProviderServiceUnavailableError,
+)
+from core.services.converter_services import (
+    UnprocessableContentError as YProviderUnprocessableContentError,
+)
+from core.services.converter_services import (
+    UnsupportedMediaTypeError as YProviderUnsupportedMediaTypeError,
+)
+from core.services.converter_services import (
+    ValidationError as YProviderValidationError,
+)
+from core.services.jwt_services import (
+    ConfigurationError as JWTConfigurationError,
+)
+from core.services.jwt_services import JWTService
+from core.services.search_indexers import (
+    get_document_indexer,
+    get_visited_document_ids_of,
+)
+from core.services.yhub_services import YHubError, YHubService
+from core.tasks.access import reset_service_connections_on_commit
+from core.tasks.documents import sync_service_restorations_in_cascade
+from core.tasks.mail import send_ask_for_access_mail, send_mention_notification_mail
+from core.tasks.search import trigger_batch_document_indexer
+from core.utils.analytics import PosthogEventName, posthog_capture
+from core.utils.dicts import lowercase_keys
+from core.utils.s3 import get_s3_client
+from core.utils.treebeard import create_tree_node_with_retry
+from core.utils.users import users_sharing_documents_with
+from core.utils.yjs import extract_attachments_from_update
 
+from ..enums import FeatureFlag, SearchType
 from . import permissions, serializers, utils
-from .filters import DocumentFilter
+from .filters import (
+    DocumentFilter,
+    ListDocumentFilter,
+    UserSearchFilter,
+)
+from .throttling import (
+    DocumentAccessThrottle,
+    DocumentThrottle,
+    UserListThrottleBurst,
+    UserListThrottleSustained,
+)
 
 logger = logging.getLogger(__name__)
-
-ATTACHMENTS_FOLDER = "attachments"
-UUID_REGEX = (
-    r"[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"
-)
-FILE_EXT_REGEX = r"\.[a-zA-Z]{3,4}"
-MEDIA_STORAGE_URL_PATTERN = re.compile(
-    f"{settings.MEDIA_URL:s}(?P<pk>{UUID_REGEX:s})/"
-    f"(?P<key>{ATTACHMENTS_FOLDER:s}/{UUID_REGEX:s}{FILE_EXT_REGEX:s})$"
-)
-COLLABORATION_WS_URL_PATTERN = re.compile(rf"(?:^|&)room=(?P<pk>{UUID_REGEX})(?:&|$)")
 
 # pylint: disable=too-many-ancestors
 
 
-class NestedGenericViewSet(drf.viewsets.GenericViewSet):
+class NestedGenericViewSet(viewsets.GenericViewSet):
     """
     A generic Viewset aims to be used in a nested route context.
     e.g: `/api/v1.0/resource_1/<resource_1_pk>/resource_2/<resource_2_pk>/`
@@ -112,34 +165,49 @@ class SerializerPerActionMixin:
 
     This mixin is useful to avoid to define a serializer class for each action in the
     `get_serializer_class` method.
-    """
 
-    serializer_classes: dict[str, type] = {}
-    default_serializer_class: type = None
+    Example:
+    ```
+    class MyViewSet(SerializerPerActionMixin, viewsets.GenericViewSet):
+        serializer_class = MySerializer
+        list_serializer_class = MyListSerializer
+        retrieve_serializer_class = MyRetrieveSerializer
+    ```
+    """
 
     def get_serializer_class(self):
         """
         Return the serializer class to use depending on the action.
         """
-        return self.serializer_classes.get(self.action, self.default_serializer_class)
+        if serializer_class := getattr(self, f"{self.action}_serializer_class", None):
+            return serializer_class
+        return super().get_serializer_class()
 
 
 class Pagination(drf.pagination.PageNumberPagination):
     """Pagination to display no more than 100 objects per page sorted by creation date."""
 
-    ordering = "-created_on"
-    max_page_size = 100
+    max_page_size = 200
     page_size_query_param = "page_size"
 
 
 class UserViewSet(
-    drf.mixins.UpdateModelMixin, drf.viewsets.GenericViewSet, drf.mixins.ListModelMixin
+    drf.mixins.UpdateModelMixin, viewsets.GenericViewSet, drf.mixins.ListModelMixin
 ):
     """User ViewSet"""
 
     permission_classes = [permissions.IsSelf]
-    queryset = models.User.objects.all()
+    queryset = models.User.objects.filter(is_active=True)
     serializer_class = serializers.UserSerializer
+    pagination_class = None
+    throttle_classes = []
+
+    def get_throttles(self):
+        self.throttle_classes = []
+        if self.action == "list":
+            self.throttle_classes = [UserListThrottleBurst, UserListThrottleSustained]
+
+        return super().get_throttles()
 
     def get_queryset(self):
         """
@@ -150,29 +218,109 @@ class UserViewSet(
         """
         queryset = self.queryset
 
-        if self.action == "list":
-            # Exclude all users already in the given document
-            if document_id := self.request.GET.get("document_id", ""):
-                queryset = queryset.exclude(documentaccess__document_id=document_id)
+        if self.action != "list":
+            return queryset
 
-            # Filter users by email similarity
-            if query := self.request.GET.get("q", ""):
-                # For performance reasons we filter first by similarity, which relies on an index,
-                # then only calculate precise similarity scores for sorting purposes
-                queryset = queryset.filter(email__trigram_word_similar=query)
+        filterset = UserSearchFilter(
+            self.request.GET, queryset=queryset, request=self.request
+        )
+        if not filterset.is_valid():
+            raise drf.exceptions.ValidationError(filterset.errors)
 
-                queryset = queryset.annotate(
-                    similarity=TrigramSimilarity("email", query)
+        # Exclude all users already in the given document
+        if document_id := self.request.query_params.get("document_id", ""):
+            queryset = queryset.exclude(documentaccess__document_id=document_id)
+
+        filter_data = filterset.form.cleaned_data
+        query = remove_accents(filter_data["q"])
+
+        # For emails, match emails by Levenstein distance to prevent typing errors
+        if "@" in query:
+            return (
+                queryset.annotate(
+                    distance=RawSQL(
+                        "levenshtein(unaccent(email::text), %s::text)", (query,)
+                    )
                 )
-                # When the query only is on the name part, we should try to make many proposals
-                # But when the query looks like an email we should only propose serious matches
-                threshold = 0.6 if "@" in query else 0.1
+                .filter(distance__lte=3)
+                .order_by("distance", "email")[: settings.API_USERS_LIST_LIMIT]
+            )
 
-                queryset = queryset.filter(similarity__gt=threshold).order_by(
-                    "-similarity", "email"
-                )
+        # Use trigram similarity for non-email-like queries
+        # For performance reasons we filter first by similarity, which relies on an
+        # index, then only calculate precise similarity scores for sorting purposes.
+        #
+        # Additionally results are reordered to prefer users "closer" to the current
+        # user: users they recently shared documents with, then same email domain.
+        # To achieve that without complex SQL, we build a proximity score in Python
+        # and return the top N results.
+        # For security results, users that match neither of these proximity criteria
+        # are not returned at all, to prevent email enumeration.
+        current_user = self.request.user
+        shared_map = users_sharing_documents_with(current_user.id)
 
-        return queryset
+        user_email_domain = get_domain_from_email(current_user.email) or ""
+
+        candidates = list(
+            queryset.annotate(
+                sim_email=TrigramSimilarity("email", query),
+                sim_name=TrigramSimilarity("full_name", query),
+            )
+            .annotate(similarity=Greatest("sim_email", "sim_name"))
+            .filter(similarity__gt=0.2)
+            .order_by("-similarity")
+        )
+
+        # Keep only users that either share documents with the current user
+        # or have an email with the same domain as the current user.
+        filtered_candidates = []
+        for u in candidates:
+            candidate_domain = get_domain_from_email(u.email) or ""
+            if shared_map.get(u.id) or (
+                user_email_domain and candidate_domain == user_email_domain
+            ):
+                filtered_candidates.append(u)
+
+        candidates = filtered_candidates
+
+        # Build ordering key for each candidate
+        def _sort_key(u):
+            # shared priority: most recent first
+            # Use shared_last_at timestamp numeric for secondary ordering when shared.
+            shared_last_at = shared_map.get(u.id)
+            if shared_last_at:
+                is_shared = 1
+                shared_score = int(shared_last_at.timestamp())
+            else:
+                is_shared = 0
+                shared_score = 0
+
+            # domain proximity
+            candidate_email_domain = get_domain_from_email(u.email) or ""
+
+            same_full_domain = (
+                1
+                if candidate_email_domain
+                and candidate_email_domain == user_email_domain
+                else 0
+            )
+
+            # similarity fallback
+            sim = getattr(u, "similarity", 0) or 0
+
+            return (
+                is_shared,
+                shared_score,
+                same_full_domain,
+                sim,
+            )
+
+        # Sort candidates by the key descending and return top N as a queryset-like
+        # list. Keep return type consistent with previous behavior (QuerySet slice
+        # was returned) by returning a list of model instances.
+        candidates.sort(key=_sort_key, reverse=True)
+
+        return candidates[: settings.API_USERS_LIST_LIMIT]
 
     @drf.decorators.action(
         detail=False,
@@ -190,98 +338,92 @@ class UserViewSet(
             self.serializer_class(request.user, context=context).data
         )
 
+    @drf.decorators.action(
+        detail=False,
+        methods=["post"],
+        url_path="onboarding-done",
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def onboarding_done(self, request):
+        """
+        Allows the frontend to mark the first connection as done for the current user,
+        e.g. after showing an onboarding message.
+        """
+        if request.user.is_first_connection:
+            request.user.is_first_connection = False
+            request.user.save(update_fields=["is_first_connection", "updated_at"])
+
+        return drf.response.Response(
+            {"detail": "Onboarding marked as done."}, status=status.HTTP_200_OK
+        )
+
+
+class ReconciliationConfirmView(APIView):
+    """API endpoint to confirm user reconciliation emails.
+
+    GET /user-reconciliations/{user_type}/{confirmation_id}/
+    Marks `active_email_checked` or `inactive_email_checked` to True.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, user_type, confirmation_id):
+        """
+        Check the confirmation ID and mark the corresponding email as checked.
+        """
+        try:
+            # validate UUID
+            uuid_obj = uuid.UUID(str(confirmation_id))
+        except ValueError:
+            return drf_response.Response(
+                {"detail": "Badly formatted confirmation id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if user_type not in ("active", "inactive"):
+            return drf_response.Response(
+                {"detail": "Invalid user_type"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        lookup = (
+            {"active_email_confirmation_id": uuid_obj}
+            if user_type == "active"
+            else {"inactive_email_confirmation_id": uuid_obj}
+        )
+
+        try:
+            rec = models.UserReconciliation.objects.get(**lookup)
+        except models.UserReconciliation.DoesNotExist:
+            return drf_response.Response(
+                {"detail": "Reconciliation entry not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        field_name = (
+            "active_email_checked"
+            if user_type == "active"
+            else "inactive_email_checked"
+        )
+        if not getattr(rec, field_name):
+            setattr(rec, field_name, True)
+            rec.save()
+
+        return drf_response.Response({"detail": "Confirmation received"})
+
 
 class ResourceAccessViewsetMixin:
     """Mixin with methods common to all access viewsets."""
 
-    def get_permissions(self):
-        """User only needs to be authenticated to list resource accesses"""
-        if self.action == "list":
-            permission_classes = [permissions.IsAuthenticated]
-        else:
-            return super().get_permissions()
-
-        return [permission() for permission in permission_classes]
+    def filter_queryset(self, queryset):
+        """Override to filter on related resource."""
+        queryset = super().filter_queryset(queryset)
+        return queryset.filter(**{self.resource_field_name: self.kwargs["resource_id"]})
 
     def get_serializer_context(self):
         """Extra context provided to the serializer class."""
         context = super().get_serializer_context()
         context["resource_id"] = self.kwargs["resource_id"]
         return context
-
-    def get_queryset(self):
-        """Return the queryset according to the action."""
-        queryset = super().get_queryset()
-        queryset = queryset.filter(
-            **{self.resource_field_name: self.kwargs["resource_id"]}
-        )
-
-        if self.action == "list":
-            user = self.request.user
-            teams = user.teams
-            user_roles_query = (
-                queryset.filter(
-                    db.Q(user=user) | db.Q(team__in=teams),
-                    **{self.resource_field_name: self.kwargs["resource_id"]},
-                )
-                .values(self.resource_field_name)
-                .annotate(roles_array=ArrayAgg("role"))
-                .values("roles_array")
-            )
-
-            # Limit to resource access instances related to a resource THAT also has
-            # a resource access
-            # instance for the logged-in user (we don't want to list only the resource
-            # access instances pointing to the logged-in user)
-            queryset = (
-                queryset.filter(
-                    db.Q(**{f"{self.resource_field_name}__accesses__user": user})
-                    | db.Q(
-                        **{f"{self.resource_field_name}__accesses__team__in": teams}
-                    ),
-                    **{self.resource_field_name: self.kwargs["resource_id"]},
-                )
-                .annotate(user_roles=db.Subquery(user_roles_query))
-                .distinct()
-            )
-        return queryset
-
-    def destroy(self, request, *args, **kwargs):
-        """Forbid deleting the last owner access"""
-        instance = self.get_object()
-        resource = getattr(instance, self.resource_field_name)
-
-        # Check if the access being deleted is the last owner access for the resource
-        if (
-            instance.role == "owner"
-            and resource.accesses.filter(role="owner").count() == 1
-        ):
-            return drf.response.Response(
-                {"detail": "Cannot delete the last owner access for the resource."},
-                status=drf.status.HTTP_403_FORBIDDEN,
-            )
-
-        return super().destroy(request, *args, **kwargs)
-
-    def perform_update(self, serializer):
-        """Check that we don't change the role if it leads to losing the last owner."""
-        instance = serializer.instance
-
-        # Check if the role is being updated and the new role is not "owner"
-        if (
-            "role" in self.request.data
-            and self.request.data["role"] != models.RoleChoices.OWNER
-        ):
-            resource = getattr(instance, self.resource_field_name)
-            # Check if the access being updated is the last owner access for the resource
-            if (
-                instance.role == models.RoleChoices.OWNER
-                and resource.accesses.filter(role=models.RoleChoices.OWNER).count() == 1
-            ):
-                message = "Cannot change the role to a non-owner role for the last owner access."
-                raise drf.exceptions.PermissionDenied({"detail": message})
-
-        serializer.save()
 
 
 class DocumentMetadata(drf.metadata.SimpleMetadata):
@@ -301,103 +443,245 @@ class DocumentMetadata(drf.metadata.SimpleMetadata):
         return simple_metadata
 
 
+# pylint: disable=too-many-public-methods
 class DocumentViewSet(
+    SerializerPerActionMixin,
     drf.mixins.CreateModelMixin,
     drf.mixins.DestroyModelMixin,
     drf.mixins.UpdateModelMixin,
-    drf.viewsets.GenericViewSet,
+    viewsets.GenericViewSet,
 ):
     """
-    Document ViewSet for managing documents.
+    DocumentViewSet API.
 
-    Provides endpoints for creating, updating, and deleting documents,
-    along with filtering options.
+    This view set provides CRUD operations and additional actions for managing documents.
+    Supports filtering, ordering, and annotations for enhanced querying capabilities.
 
-    Filtering:
+    ### API Endpoints:
+    1. **List**: Retrieve a paginated list of documents.
+       Example: GET /documents/?page=2
+    2. **Retrieve**: Get a specific document by its ID.
+       Example: GET /documents/{id}/
+    3. **Create**: Create a new document.
+       Example: POST /documents/
+    4. **Update**: Update a document by its ID.
+       Example: PUT /documents/{id}/
+    5. **Delete**: Soft delete a document by its ID.
+       Example: DELETE /documents/{id}/
+
+    ### Additional Actions:
+    1. **Trashbin**: List soft deleted documents for a document owner
+        Example: GET /documents/trashbin/
+
+    2. **Restore**: Restore a soft deleted document.
+        Example: POST /documents/{id}/restore/
+
+    3. **Move**: Move a document to another parent document.
+        Example: POST /documents/{id}/move/
+
+    4. **Duplicate**: Duplicate a document.
+        Example: POST /documents/{id}/duplicate/
+
+    5. **Children**: List or create child documents.
+        Example: GET, POST /documents/{id}/children/
+
+    6. **Favorite**: Get list of favorite documents for a user. Mark or unmark
+        a document as favorite.
+        Examples:
+        - GET /documents/favorites/
+        - POST, DELETE /documents/{id}/favorite/
+
+    7. **Create for Owner**: Create a document via server-to-server on behalf of a user.
+        Example: POST /documents/create-for-owner/
+
+    8. **Link Configuration**: Update document link configuration.
+        Example: PUT /documents/{id}/link-configuration/
+
+    9. **Attachment Upload**: Upload a file attachment for the document.
+        Example: POST /documents/{id}/attachment-upload/
+
+    10. **Media Auth**: Authorize access to document media.
+        Example: GET /documents/media-auth/
+
+    11. **AI Transform**: Apply a transformation action on a piece of text with AI.
+        Example: POST /documents/{id}/ai-transform/
+        Expected data:
+        - text (str): The input text.
+        - action (str): The transformation type, one of [prompt, correct, rephrase, summarize].
+        Returns: JSON response with the processed text.
+        Throttled by: AIDocumentRateThrottle, AIUserRateThrottle.
+
+    12. **AI Translate**: Translate a piece of text with AI.
+        Example: POST /documents/{id}/ai-translate/
+        Expected data:
+        - text (str): The input text.
+        - language (str): The target language, chosen from settings.LANGUAGES.
+        Returns: JSON response with the translated text.
+        Throttled by: AIDocumentRateThrottle, AIUserRateThrottle.
+
+    13. **AI Proxy**: Proxy an AI request to an external AI service.
+        Example: POST /api/v1.0/documents/<resource_id>/ai-proxy
+
+    16. **Mention**: Mention a user on the document and notify them by email.
+        Example: POST /documents/{id}/mention/
+        Expected data:
+        - anchor_id (uuid): The block or comment id of the mention, used for
+          the email deeplink.
+        - mentioned_user_id (uuid): The user being mentioned, must have access
+          to the document.
+        - thread_id (uuid, optional): The comment thread in which the mention
+          occurs. Omit for mentions in the document body.
+        Returns: 201 with the created mention.
+
+    ### Ordering: created_at, updated_at, is_favorite, title
+
+        Example:
+        - Ascending: GET /api/v1.0/documents/?ordering=created_at
+        - Descending: GET /api/v1.0/documents/?ordering=-title
+
+    ### Filtering:
         - `is_creator_me=true`: Returns documents created by the current user.
         - `is_creator_me=false`: Returns documents created by other users.
         - `is_favorite=true`: Returns documents marked as favorite by the current user
         - `is_favorite=false`: Returns documents not marked as favorite by the current user
         - `title=hello`: Returns documents which title contains the "hello" string
 
-    Example Usage:
+        Example:
         - GET /api/v1.0/documents/?is_creator_me=true&is_favorite=true
         - GET /api/v1.0/documents/?is_creator_me=false&title=hello
+
+    ### Annotations:
+    1. **is_favorite**: Indicates whether the document is marked as favorite by the current user.
+    2. **user_roles**: Roles the current user has on the document or its ancestors.
+
+    ### Notes:
+    - Only the highest ancestor in a document hierarchy is shown in list views.
+    - Implements soft delete logic to retain document tree structures.
     """
 
-    filter_backends = [drf_filters.DjangoFilterBackend, filters.OrderingFilter]
-    filterset_class = DocumentFilter
     metadata_class = DocumentMetadata
     ordering = ["-updated_at"]
-    ordering_fields = ["created_at", "is_favorite", "updated_at", "title"]
+    ordering_fields = ["created_at", "updated_at", "title"]
+    pagination_class = Pagination
     permission_classes = [
-        permissions.AccessPermission,
+        permissions.DocumentPermission,
     ]
-    queryset = models.Document.objects.all()
+    throttle_classes = [DocumentThrottle]
+    throttle_scope = "document"
+    queryset = models.Document.objects.select_related("creator").all()
     serializer_class = serializers.DocumentSerializer
-
-    def get_serializer_class(self):
-        """
-        Use ListDocumentSerializer for list actions, otherwise use DocumentSerializer.
-        """
-        if self.action == "list":
-            return serializers.ListDocumentSerializer
-        return self.serializer_class
+    ai_translate_serializer_class = serializers.AITranslateSerializer
+    all_serializer_class = serializers.ListDocumentSerializer
+    children_serializer_class = serializers.ListDocumentSerializer
+    descendants_serializer_class = serializers.ListDocumentSerializer
+    favorite_list_serializer_class = serializers.ListDocumentSerializer
+    list_serializer_class = serializers.ListDocumentSerializer
+    trashbin_serializer_class = serializers.ListDocumentSerializer
+    tree_serializer_class = serializers.ListDocumentSerializer
+    search_serializer_class = serializers.SearchDocumentSerializer
 
     def get_queryset(self):
-        """Optimize queryset to include favorite status for the current user."""
-        queryset = super().get_queryset()
+        """Get queryset performing all annotation and filtering on the document tree structure."""
         user = self.request.user
+        queryset = super().get_queryset()
 
-        # Annotate the number of accesses associated with each document
-        queryset = queryset.annotate(nb_accesses=Count("accesses", distinct=True))
+        # Only list views need filtering and annotation
+        if self.detail:
+            return queryset
 
         if not user.is_authenticated:
-            # If the user is not authenticated, annotate `is_favorite` as False
-            return queryset.annotate(is_favorite=Value(False))
+            return queryset.none()
 
-        # Annotate the queryset to indicate if the document is favorited by the current user
-        favorite_exists = models.DocumentFavorite.objects.filter(
-            document_id=OuterRef("pk"), user=user
-        )
-        queryset = queryset.annotate(is_favorite=Exists(favorite_exists))
+        queryset = queryset.filter(ancestors_deleted_at__isnull=True)
 
-        # Annotate the queryset with the logged-in user roles
-        user_roles_query = (
+        # Filter documents to which the current user has access...
+        access_documents_ids = (
             models.DocumentAccess.objects.filter(
-                Q(user=user) | Q(team__in=user.teams),
-                document_id=OuterRef("pk"),
+                db.Q(user=user) | db.Q(team__in=user.teams)
             )
-            .values("document")
-            .annotate(roles_array=ArrayAgg("role"))
-            .values("roles_array")
+            .order_by()
+            .values_list("document_id", flat=True)
         )
-        return queryset.annotate(user_roles=Subquery(user_roles_query)).distinct()
 
-    def list(self, request, *args, **kwargs):
-        """Restrict resources returned by the list endpoint"""
-        queryset = self.filter_queryset(self.get_queryset())
+        # ...or that were previously accessed and are not restricted
+        traced_documents_ids = (
+            models.LinkTrace.objects.filter(user=user)
+            .exclude(document__link_reach=models.LinkReachChoices.RESTRICTED)
+            .order_by()
+            .values_list("document_id", flat=True)
+        )
+
+        # A single `IN (... UNION ...)` lets PostgreSQL drive the query from the
+        # (small) set of document ids and probe the primary key index. The
+        # equivalent `id IN (...) OR (id IN (...) AND ...)` results in a sequential
+        # scan of the whole document table.
+        return queryset.filter(id__in=access_documents_ids.union(traced_documents_ids))
+
+    def filter_queryset(self, queryset):
+        """Override to apply annotations to generic views."""
+        queryset = super().filter_queryset(queryset)
         user = self.request.user
+        queryset = queryset.annotate_is_favorite(user)
+        queryset = queryset.annotate_user_roles(user)
+        queryset = queryset.annotate_user_has_link_trace(user)
 
-        if user.is_authenticated:
-            queryset = queryset.filter(
-                db.Q(accesses__user=user)
-                | db.Q(accesses__team__in=user.teams)
-                | (
-                    db.Q(link_traces__user=user)
-                    & ~db.Q(link_reach=models.LinkReachChoices.RESTRICTED)
-                )
-            )
-        else:
-            queryset = queryset.none()
+        return queryset
 
+    def get_response_for_queryset(self, queryset, context=None):
+        """Return paginated response for the queryset if requested."""
+        context = context or self.get_serializer_context()
         page = self.paginate_queryset(queryset)
         if page is not None:
-            serializer = self.get_serializer(page, many=True)
+            serializer = self.get_serializer(page, many=True, context=context)
             return self.get_paginated_response(serializer.data)
 
-        serializer = self.get_serializer(queryset, many=True)
+        serializer = self.get_serializer(queryset, many=True, context=context)
         return drf.response.Response(serializer.data)
+
+    def list(self, request, *args, **kwargs):
+        """
+        Returns a DRF response containing the filtered, annotated and ordered document list.
+
+        This method applies filtering based on request parameters using `ListDocumentFilter`.
+        It performs early filtering on model fields, annotates user roles, and removes
+        descendant documents to keep only the highest ancestors readable by the current user.
+        """
+        user = request.user
+
+        # Not calling filter_queryset. We do our own cooking.
+        queryset = self.get_queryset()
+
+        filterset = ListDocumentFilter(request.GET, queryset=queryset, request=request)
+        if not filterset.is_valid():
+            raise drf.exceptions.ValidationError(filterset.errors)
+        filter_data = filterset.form.cleaned_data
+
+        # Filter as early as possible on fields that are available on the model
+        for field in ["is_creator_me", "title", "q"]:
+            queryset = filterset.filters[field].filter(queryset, filter_data[field])
+
+        queryset = queryset.annotate_user_roles(user).annotate_user_has_link_trace(user)
+
+        # Among the results, we may have documents that are ancestors/descendants
+        # of each other. In this case we want to keep only the highest ancestors.
+        root_paths = utils.filter_root_paths(
+            queryset.order_by("path").values_list("path", flat=True),
+            skip_sorting=True,
+        )
+        queryset = queryset.filter(path__in=root_paths)
+
+        # Annotate favorite status and filter if applicable as late as possible
+        queryset = queryset.annotate_is_favorite(user)
+        queryset = filterset.filters["is_favorite"].filter(
+            queryset, filter_data["is_favorite"]
+        )
+
+        # Apply ordering only now that everything is filtered and annotated
+        queryset = filters.OrderingFilter().filter_queryset(
+            self.request, queryset, self
+        )
+
+        return self.get_response_for_queryset(queryset)
 
     def retrieve(self, request, *args, **kwargs):
         """
@@ -405,31 +689,221 @@ class DocumentViewSet(
         on a user's list view even though the user has no specific role in the document (link
         access when the link reach configuration of the document allows it).
         """
+        user = self.request.user
         instance = self.get_object()
+
+        # The `create` query generates 5 db queries which are much less efficient than an
+        # `exists` query. The user will visit the document many times after the first visit
+        # so that's what we should optimize for.
+        if (
+            user.is_authenticated
+            and not instance.link_traces.filter(user=user).exists()
+        ):
+            models.LinkTrace.objects.create(document=instance, user=request.user)
+
+        # To avoid N+1 query, we force the `user_has_link_trace` normally set by the
+        # queryset.annotate_user_has_link_trace method. If the user is connected, it must be True.
+        instance.user_has_link_trace = user.is_authenticated
+
         serializer = self.get_serializer(instance)
-
-        if self.request.user.is_authenticated:
-            try:
-                # Add a trace that the user visited the document (this is needed to include
-                # the document in the user's list view)
-                models.LinkTrace.objects.create(
-                    document=instance,
-                    user=self.request.user,
-                )
-            except ValidationError:
-                # The trace already exists, so we just pass without doing anything
-                pass
-
         return drf.response.Response(serializer.data)
+
+    def _apply_uploaded_file_conversion(self, serializer):
+        """
+        Check if a file has been uploaded with a doc or a children is created.
+        If a file is present and the conversion upload enabled, the file is converted
+        using the converter service and the title in the serializer is filled with
+        the file name.
+
+        Return the converted content, as a raw Yjs update the collaboration
+        server can be seeded with, or None when no file was uploaded. The
+        content itself is not stored by Django, it is saved by the
+        collaboration server.
+        """
+        uploaded_file = serializer.validated_data.pop("file", None)
+
+        if uploaded_file and not settings.CONVERSION_UPLOAD_ENABLED:
+            raise drf.exceptions.ValidationError(
+                {"file": ["file upload is not allowed"]}
+            )
+
+        if not uploaded_file:
+            return None
+
+        # If a file is uploaded, convert it to Yjs format
+        try:
+            file_content = uploaded_file.read()
+
+            converter = Converter()
+            converted_content = converter.convert(
+                file_content,
+                content_type=uploaded_file.content_type,
+                accept=mime_types.YJS,
+            )
+            serializer.validated_data["title"] = uploaded_file.name
+            logger.info("conversion ended successfully")
+
+            posthog_capture(
+                PosthogEventName.DOC_IMPORTED,
+                self.request.user,
+                {"content_type": uploaded_file.content_type},
+            )
+        except YProviderUnsupportedMediaTypeError as err:
+            logger.error("could not convert file content with error: %s", err)
+            exc = drf.exceptions.APIException({"file": ["File type is not supported"]})
+            exc.status_code = status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+            raise exc from err
+        except YProviderUnprocessableContentError as err:
+            logger.error("could not convert file content with error: %s", err)
+            exc = drf.exceptions.APIException(
+                {"file": ["Could not process file content"]}
+            )
+            exc.status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+            raise exc from err
+        except ConversionError as err:
+            logger.error("could not convert file content with error: %s", err)
+            raise drf.exceptions.APIException(
+                {"file": ["Could not convert file content"]}
+            ) from err
+
+        return converted_content
+
+    def _create_collaboration_document(self, document, update):
+        """
+        Seed a freshly created document with the content it was imported from.
+
+        The collaboration server owns the content from there on, so a failure
+        here leaves a document that lost what was uploaded: it is reported to
+        the caller, who is left to create it again.
+        """
+        try:
+            YHubService(user=self.request.user).create_ydoc(document, update)
+        except YHubError as err:
+            logger.error("could not save the imported content with error: %s", err)
+            raise drf.exceptions.ValidationError(
+                {"file": ["Could not save the imported file content"]}
+            ) from err
 
     def perform_create(self, serializer):
         """Set the current user as creator and owner of the newly created object."""
-        obj = serializer.save(creator=self.request.user)
-        models.DocumentAccess.objects.create(
-            document=obj,
-            user=self.request.user,
-            role=models.RoleChoices.OWNER,
+
+        update = self._apply_uploaded_file_conversion(serializer)
+
+        with transaction.atomic():
+            obj = create_tree_node_with_retry(
+                lambda: models.Document.add_root(
+                    creator=self.request.user,
+                    **serializer.validated_data,
+                )
+            )
+            serializer.instance = obj
+            models.DocumentAccess.objects.create(
+                document=obj,
+                user=self.request.user,
+                role=models.RoleChoices.OWNER,
+            )
+
+            if update is not None:
+                self._create_collaboration_document(obj, update)
+
+        posthog_capture(
+            PosthogEventName.DOC_CREATED, self.request.user, {}, document=obj
         )
+
+    def perform_destroy(self, instance):
+        """Override to implement a soft delete instead of dumping the record in database."""
+        instance.soft_delete()
+
+        reset_service_connections_on_commit(instance.pk)
+
+        posthog_capture(
+            PosthogEventName.DOC_DELETED, self.request.user, {}, document=instance
+        )
+
+    @drf.decorators.action(
+        detail=False,
+        methods=["get"],
+        permission_classes=[permissions.IsAuthenticated],
+        url_path="favorites",
+    )
+    def favorite_list(self, request, *args, **kwargs):
+        """Get list of favorite documents for the current user."""
+        user = request.user
+
+        queryset = self.get_queryset()
+
+        # Among the results, we may have documents that are ancestors/descendants
+        # of each other. In this case we want to keep only the highest ancestors.
+        root_paths = utils.filter_root_paths(
+            queryset.order_by("path").values_list("path", flat=True),
+            skip_sorting=True,
+        )
+
+        path_list = db.Q()
+        for path in root_paths:
+            path_list |= db.Q(path__startswith=path)
+
+        favorite_documents_ids = models.DocumentFavorite.objects.filter(
+            user=user
+        ).values_list("document_id", flat=True)
+
+        queryset = self.queryset.filter(path_list)
+        queryset = queryset.filter(id__in=favorite_documents_ids)
+        queryset = queryset.filter(ancestors_deleted_at__isnull=True)
+        queryset = queryset.order_by("-updated_at")
+        queryset = queryset.annotate_user_roles(user).annotate_user_has_link_trace(user)
+        queryset = queryset.annotate(
+            is_favorite=db.Value(True, output_field=db.BooleanField())
+        )
+        return self.get_response_for_queryset(queryset)
+
+    @drf.decorators.action(
+        detail=False,
+        methods=["get"],
+        ordering=["-deleted_at"],
+        ordering_fields=["deleted_at"],
+    )
+    def trashbin(self, request, *args, **kwargs):
+        """
+        Retrieve soft-deleted documents for which the current user has the owner role.
+
+        The selected documents are those deleted within the cutoff period defined in the
+        settings (see TRASHBIN_CUTOFF_DAYS), before they are considered permanently deleted.
+        """
+
+        if not request.user.is_authenticated:
+            return self.get_response_for_queryset(self.queryset.none())
+
+        access_documents_paths = (
+            models.DocumentAccess.objects.select_related("document")
+            .filter(
+                db.Q(user=self.request.user) | db.Q(team__in=self.request.user.teams),
+                role=models.RoleChoices.OWNER,
+            )
+            .values_list("document__path", flat=True)
+        )
+
+        if not access_documents_paths:
+            return self.get_response_for_queryset(self.queryset.none())
+
+        children_clause = db.Q()
+        for path in access_documents_paths:
+            children_clause |= db.Q(path__startswith=path)
+
+        queryset = self.queryset.filter(
+            children_clause,
+            deleted_at__isnull=False,
+            deleted_at__gte=models.get_trashbin_cutoff(),
+        )
+        queryset = queryset.annotate_user_roles(
+            self.request.user
+        ).annotate_user_has_link_trace(self.request.user)
+
+        queryset = filters.OrderingFilter().filter_queryset(
+            self.request, queryset, self
+        )
+
+        return self.get_response_for_queryset(queryset)
 
     @drf.decorators.action(
         authentication_classes=[authentication.ServerToServerAuthentication],
@@ -442,6 +916,7 @@ class DocumentViewSet(
         """
         Create a document on behalf of a specified owner (pre-existing user or invited).
         """
+
         # Deserialize and validate the data
         serializer = serializers.ServerCreateDocumentSerializer(data=request.data)
         if not serializer.is_valid():
@@ -455,82 +930,1001 @@ class DocumentViewSet(
             {"id": str(document.id)}, status=status.HTTP_201_CREATED
         )
 
-    @drf.decorators.action(detail=True, methods=["get"], url_path="versions")
-    def versions_list(self, request, *args, **kwargs):
+    @drf.decorators.action(
+        authentication_classes=[authentication.CollaborationServerAuthentication],
+        detail=True,
+        methods=["post"],
+        permission_classes=[],
+        throttle_classes=[],
+        url_path="content-updated",
+    )
+    def content_updated(self, request, *args, **kwargs):
         """
-        Return the document's versions but only those created after the user got access
-        to the document
+        Record that the collaboration server saved a new content for a document.
+
+        The content of a document does not go through Django anymore, so nothing
+        would refresh its "updated_at" as it is edited and the lists ordered by
+        it would freeze. The collaboration server calls this once it persisted
+        the changes of a document, at most once per debounce window.
+
+        The new content is then read back from the collaboration server to
+        refresh the search index, in a task: this call is on the path of a
+        worker persisting a document, it only records what happened.
+
+        The update is written without going through the model: saving it would
+        index the document a second time, through the post_save signal.
+        """
+        try:
+            document_id = uuid.UUID(kwargs["pk"])
+        except ValueError as err:
+            raise Http404 from err
+
+        updated_at = timezone.now()
+        if not models.Document.objects.filter(pk=document_id).update(
+            updated_at=updated_at
+        ):
+            raise Http404
+
+        # Throttled like any other change: the collaboration server calls this
+        # once per debounce window, for as long as a document is being edited.
+        trigger_batch_document_indexer(document_id, updated_at)
+
+        return drf_response.Response(status=status.HTTP_204_NO_CONTENT)
+
+    @drf.decorators.action(detail=True, methods=["post"])
+    @transaction.atomic
+    def move(self, request, *args, **kwargs):
+        """
+        Move a document to another location within the document tree.
+
+        The user must be an administrator or owner of both the document being moved
+        and the target parent document.
         """
         user = request.user
-        if not user.is_authenticated:
-            raise drf.exceptions.PermissionDenied("Authentication required.")
+        document = self.get_object()  # including permission checks
 
-        # Validate query parameters using dedicated serializer
-        serializer = serializers.VersionFilterSerializer(data=request.query_params)
+        # Validate the input payload
+        serializer = serializers.MoveDocumentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
 
-        document = self.get_object()
-
-        # Users should not see version history dating from before they gained access to the
-        # document. Filter to get the minimum access date for the logged-in user
-        access_queryset = document.accesses.filter(
-            db.Q(user=user) | db.Q(team__in=user.teams)
-        ).aggregate(min_date=db.Min("created_at"))
-
-        # Handle the case where the user has no accesses
-        min_datetime = access_queryset["min_date"]
-        if not min_datetime:
-            return drf.exceptions.PermissionDenied(
-                "Only users with specific access can see version history"
+        target_document_id = validated_data["target_document_id"]
+        try:
+            target_document = models.Document.objects.get(
+                id=target_document_id, ancestors_deleted_at__isnull=True
+            )
+        except models.Document.DoesNotExist:
+            return drf.response.Response(
+                {"target_document_id": "Target parent document does not exist."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        versions_data = document.get_versions_slice(
-            from_version_id=serializer.validated_data.get("version_id"),
-            min_datetime=min_datetime,
-            page_size=serializer.validated_data.get("page_size"),
+        position = validated_data["position"]
+        message = None
+        owner_accesses = []
+        if position in [
+            enums.MoveNodePositionChoices.FIRST_CHILD,
+            enums.MoveNodePositionChoices.LAST_CHILD,
+        ]:
+            if not target_document.get_abilities(user).get("move"):
+                message = (
+                    "You do not have permission to move documents "
+                    "as a child to this target document."
+                )
+        elif target_document.is_root():
+            owner_accesses = list(
+                document.get_root().accesses.filter(role=models.RoleChoices.OWNER)
+            )
+        elif not target_document.get_parent().get_abilities(user).get("move"):
+            message = (
+                "You do not have permission to move documents "
+                "as a sibling of this target document."
+            )
+
+        if message:
+            return drf.response.Response(
+                {"target_document_id": message},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            document.move(target_document, pos=position)
+        except InvalidMoveToDescendant:
+            return drf.response.Response(
+                {"target_document_id": "Cannot move a document to its own descendant."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # A move changes the document's permission scope in any of these cases:
+        #   - it is currently a root (it carries its own scope),
+        #   - it is moving into a different tree (different current root than target's),
+        #   - it is being promoted to root as a sibling of its own current root.
+        # In all these cases, direct accesses and pending invitations must be wiped so
+        # the document inherits the new scope. Deletions and the move share the same
+        # atomic transaction, so a failure rolls everything back.
+        becomes_sibling_root = (
+            position
+            not in [
+                enums.MoveNodePositionChoices.FIRST_CHILD,
+                enums.MoveNodePositionChoices.LAST_CHILD,
+            ]
+            and target_document.is_root()
+        )
+        scope_changes = (
+            document.is_root()
+            or becomes_sibling_root
+            or document.get_root() != target_document.get_root()
+        )
+        if scope_changes:
+            document.accesses.all().delete()
+            document.invitations.all().delete()
+
+        # Make sure we have at least one owner
+        if (
+            owner_accesses
+            and not document.accesses.filter(role=models.RoleChoices.OWNER).exists()
+        ):
+            for owner_access in owner_accesses:
+                models.DocumentAccess.objects.update_or_create(
+                    document=document,
+                    user=owner_access.user,
+                    team=owner_access.team,
+                    defaults={"role": models.RoleChoices.OWNER},
+                )
+
+        # Invalidate the nb_accesses cache, the value has probably changed after the move.
+        document.invalidate_nb_accesses_cache()
+
+        # The document and its descendants now inherit the accesses and the link
+        # definition of other ancestors, whether or not a direct access was
+        # touched: every connection of the subtree is re-checked.
+        reset_service_connections_on_commit(document.id)
+
+        posthog_capture(
+            PosthogEventName.DOC_MOVED,
+            user,
+            {
+                "position": position,
+                "targeted_document_id": str(target_document_id),
+            },
+            document=document,
         )
 
-        return drf.response.Response(versions_data)
+        return drf.response.Response(
+            {"message": "Document moved successfully."}, status=status.HTTP_200_OK
+        )
 
     @drf.decorators.action(
         detail=True,
-        methods=["get", "delete"],
-        url_path="versions/(?P<version_id>[0-9a-f-]{36})",
+        methods=["post"],
     )
-    # pylint: disable=unused-argument
-    def versions_detail(self, request, pk, version_id, *args, **kwargs):
-        """Custom action to retrieve a specific version of a document"""
+    def restore(self, request, *args, **kwargs):
+        """
+        Restore a soft-deleted document if it was deleted less than x days ago.
+        """
+        document = self.get_object()
+        try:
+            document.restore()
+        except RuntimeError as err:
+            raise drf.exceptions.ValidationError({"detail": str(err)}) from err
+
+        # A soft deletion is no longer reported: the room should never be
+        # tombstoned, and this safety net is what lifts one should any be laid
+        # out of band. Documents of the subtree deleted on their own stay
+        # deleted, and the restored state is read back: on commit.
+        transaction.on_commit(
+            partial(sync_service_restorations_in_cascade.delay, str(document.id))
+        )
+
+        return drf_response.Response(
+            {"detail": "Document has been successfully restored."},
+            status=status.HTTP_200_OK,
+        )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["get", "post"],
+        ordering=["path"],
+    )
+    def children(self, request, *args, **kwargs):
+        """Handle listing and creating children of a document"""
         document = self.get_object()
 
-        try:
-            response = document.get_content_response(version_id=version_id)
-        except (FileNotFoundError, ClientError) as err:
-            raise Http404 from err
-
-        # Don't let users access versions that were created before they were given access
-        # to the document
-        user = request.user
-        min_datetime = min(
-            access.created_at
-            for access in document.accesses.filter(
-                db.Q(user=user) | db.Q(team__in=user.teams),
+        if request.method == "POST":
+            # Create a child document
+            serializer = serializers.DocumentSerializer(
+                data=request.data, context=self.get_serializer_context()
             )
-        )
-        if response["LastModified"] < min_datetime:
-            raise Http404
+            serializer.is_valid(raise_exception=True)
 
-        if request.method == "DELETE":
-            response = document.delete_version(version_id)
+            update = self._apply_uploaded_file_conversion(serializer)
+
+            with transaction.atomic():
+                child_document = create_tree_node_with_retry(
+                    lambda: document.add_child(
+                        creator=request.user,
+                        **serializer.validated_data,
+                    )
+                )
+
+                if update is not None:
+                    self._create_collaboration_document(child_document, update)
+
+            # Set the created instance to the serializer
+            serializer.instance = child_document
+
+            posthog_capture(
+                PosthogEventName.DOC_CREATED,
+                self.request.user,
+                {"document_parent": str(document.id)},
+                document=child_document,
+            )
+
+            headers = self.get_success_headers(serializer.data)
             return drf.response.Response(
-                status=response["ResponseMetadata"]["HTTPStatusCode"]
+                serializer.data, status=status.HTTP_201_CREATED, headers=headers
             )
 
+        # GET: List children
+        queryset = (
+            document.get_children()
+            .select_related("creator")
+            .filter(ancestors_deleted_at__isnull=True)
+        )
+        queryset = self.filter_queryset(queryset)
+
+        filterset = DocumentFilter(request.GET, queryset=queryset)
+        if not filterset.is_valid():
+            raise drf.exceptions.ValidationError(filterset.errors)
+
+        queryset = filterset.qs
+
+        # Pass ancestors' links paths mapping to the serializer as a context variable
+        # in order to allow saving time while computing abilities on the instance
+        paths_links_mapping = document.compute_ancestors_links_paths_mapping()
+
+        return self.get_response_for_queryset(
+            queryset,
+            context={
+                "request": request,
+                "paths_links_mapping": paths_links_mapping,
+            },
+        )
+
+    @drf.decorators.action(
+        detail=False,
+        methods=["get"],
+    )
+    def all(self, request, *args, **kwargs):
+        """
+        Returns all documents (including descendants) that the user has access to.
+
+        Unlike the list endpoint which only returns top-level documents, this endpoint
+        returns all documents including children, grandchildren, etc.
+        """
+
+        if not settings.DOCUMENT_ALL_ENDPOINT_ENABLED:
+            raise Http404()
+
+        user = self.request.user
+
+        accessible_documents = self.get_queryset()
+        accessible_paths = list(accessible_documents.values_list("path", flat=True))
+
+        if not accessible_paths:
+            return self.get_response_for_queryset(self.queryset.none())
+
+        # Build query to include all descendants using path prefix matching
+        descendants_clause = db.Q()
+        for path in accessible_paths:
+            descendants_clause |= db.Q(path__startswith=path)
+
+        queryset = self.queryset.filter(
+            descendants_clause, ancestors_deleted_at__isnull=True
+        )
+
+        # Apply existing filters
+        filterset = ListDocumentFilter(
+            self.request.GET, queryset=queryset, request=self.request
+        )
+        if not filterset.is_valid():
+            raise drf.exceptions.ValidationError(filterset.errors)
+        filter_data = filterset.form.cleaned_data
+
+        # Filter as early as possible on fields that are available on the model
+        for field in ["is_creator_me", "title", "q"]:
+            queryset = filterset.filters[field].filter(queryset, filter_data[field])
+
+        queryset = queryset.annotate_user_roles(user).annotate_user_has_link_trace(user)
+
+        # Annotate favorite status and filter if applicable as late as possible
+        queryset = queryset.annotate_is_favorite(user)
+        queryset = filterset.filters["is_favorite"].filter(
+            queryset, filter_data["is_favorite"]
+        )
+
+        # Apply ordering only now that everything is filtered and annotated
+        queryset = filters.OrderingFilter().filter_queryset(
+            self.request, queryset, self
+        )
+
+        return self.get_response_for_queryset(queryset)
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["get"],
+        ordering=["path"],
+    )
+    def tree(self, request, pk, *args, **kwargs):
+        """
+        List ancestors tree above the document.
+        What we need to display is the tree structure opened for the current document.
+        """
+        user = self.request.user
+
+        try:
+            current_document = (
+                self.queryset.select_related(None)
+                .only("depth", "path", "ancestors_deleted_at")
+                .get(pk=pk)
+            )
+        except models.Document.DoesNotExist as excpt:
+            raise drf.exceptions.NotFound() from excpt
+
+        is_deleted = current_document.ancestors_deleted_at is not None
+
+        if is_deleted:
+            if current_document.get_role(user) != models.RoleChoices.OWNER:
+                raise (
+                    drf.exceptions.PermissionDenied()
+                    if request.user.is_authenticated
+                    else drf.exceptions.NotAuthenticated()
+                )
+            highest_readable = current_document
+            ancestors = self.queryset.select_related(None).filter(pk=pk)
+        else:
+            ancestors = (
+                (
+                    current_document.get_ancestors()
+                    | self.queryset.select_related(None).filter(pk=pk)
+                )
+                .filter(ancestors_deleted_at__isnull=True)
+                .order_by("path")
+            )
+            # Get the highest readable ancestor
+            highest_readable = (
+                ancestors.select_related(None)
+                .readable_per_se(request.user)
+                .only("depth", "path")
+                .first()
+            )
+
+            if highest_readable is None:
+                raise (
+                    drf.exceptions.PermissionDenied()
+                    if request.user.is_authenticated
+                    else drf.exceptions.NotAuthenticated()
+                )
+        paths_links_mapping = {}
+        ancestors_links = []
+        children_clause = db.Q()
+        for ancestor in ancestors:
+            # Compute cache for ancestors links to avoid many queries while computing
+            # abilities for his documents in the tree!
+            ancestors_links.append(
+                {"link_reach": ancestor.link_reach, "link_role": ancestor.link_role}
+            )
+            paths_links_mapping[ancestor.path] = ancestors_links.copy()
+
+            if ancestor.depth < highest_readable.depth:
+                continue
+
+            children_clause |= db.Q(
+                path__startswith=ancestor.path, depth=ancestor.depth + 1
+            )
+
+        children = self.queryset.filter(children_clause, deleted_at__isnull=True)
+
+        queryset = (
+            ancestors.select_related("creator").filter(
+                depth__gte=highest_readable.depth
+            )
+            | children
+        )
+        queryset = queryset.order_by("path")
+        queryset = queryset.annotate_user_roles(user)
+        queryset = queryset.annotate_is_favorite(user)
+        queryset = queryset.annotate_user_has_link_trace(user)
+
+        # Pass ancestors' links paths mapping to the serializer as a context variable
+        # in order to allow saving time while computing abilities on the instance
+        serializer = self.get_serializer(
+            queryset,
+            many=True,
+            context={
+                "request": request,
+                "paths_links_mapping": paths_links_mapping,
+            },
+        )
         return drf.response.Response(
+            utils.nest_tree(serializer.data, self.queryset.model.steplen)
+        )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["post"],
+        permission_classes=[
+            permissions.IsAuthenticated,
+            permissions.DocumentPermission,
+        ],
+        url_path="duplicate",
+    )
+    def duplicate(self, request, *args, **kwargs):
+        """
+        Duplicate a document, alongside its descendants if requested.
+        """
+        # Get document while checking permissions
+        document_to_duplicate = self.get_object()
+
+        serializer = serializers.DocumentDuplicationSerializer(
+            data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+
+        # First phase: replicate the structure, in a transaction making no
+        # call to the collaboration server. It stays short, and its rollback
+        # on a failure leaves nothing behind anywhere.
+        with transaction.atomic():
+            duplicated_document, duplicates = self._duplicate_document_structure(
+                document_to_duplicate=document_to_duplicate,
+                serializer=serializer,
+                user=user,
+            )
+
+        # Second phase: seed each duplicate with the content of its source,
+        # out of any transaction. A failure undoes the whole duplication, so
+        # neither the database nor the collaboration server is left with an
+        # orphan.
+        self._duplicate_documents_content(duplicates, user)
+
+        posthog_capture(
+            PosthogEventName.DOC_DUPLICATED,
+            user,
             {
-                "content": response["Body"].read().decode("utf-8"),
-                "last_modified": response["LastModified"],
-                "id": version_id,
+                "duplicated_from": str(document_to_duplicate.id),
+            },
+            document=duplicated_document,
+        )
+
+        # Set the `is_favorite` attribute to False for the duplicated document, as it
+        # cannot be a favorite immediately after creation.
+        duplicated_document.is_favorite = False
+
+        serializer = serializers.DocumentSerializer(
+            duplicated_document, context=self.get_serializer_context()
+        )
+
+        return drf_response.Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _get_copy_title(title):
+        """
+        Return the title of a copy of a document titled `title`.
+
+        The title of the copy is marked as a copy at its end. If it then exceeds
+        the maximum length of a title, the original title is truncated, with an
+        ellipsis, so that the copy marker is kept.
+        """
+        max_length = models.Document._meta.get_field("title").max_length  # noqa: SLF001
+        copy_title = _("{title} (copy)").format(title=title)
+        excess = len(copy_title) - max_length
+        if excess <= 0:
+            return copy_title
+
+        ellipsis = "..."
+        kept_length = max(len(title) - excess - len(ellipsis), 0)
+        truncated_title = f"{title[:kept_length].rstrip()}{ellipsis}"
+        return _("{title} (copy)").format(title=truncated_title)[:max_length]
+
+    def _duplicate_document_structure(
+        self,
+        document_to_duplicate,
+        serializer,
+        user,
+        new_parent=None,
+    ):
+        """
+        Replicate a document, and its descendants when requested, in the
+        database only: no call to the collaboration server is made here, so
+        the transaction wrapping the replication of a whole tree stays short.
+
+        A duplicate is created without its attachments: which ones its content
+        refers to is only known once the content is copied, what
+        `_duplicate_documents_content` does next. Return the duplicate along
+        with the (source, duplicate) pairs of the whole replication for it,
+        in creation order.
+
+        Optionally duplicates accesses if `with_accesses` is set to true
+        in the payload.
+
+        Optionally replicates sub-documents if `with_descendants` is set to
+        true in the payload. The `with_accesses` option is then applied to
+        every replicated document.
+        """
+        with_accesses = serializer.validated_data.get("with_accesses", False)
+        with_descendants = (
+            serializer.validated_data.get("with_descendants", False)
+            and settings.DUPLICATE_CHILDREN_FEATURE_ENABLED
+        )
+
+        user_role = document_to_duplicate.get_role(user)
+        is_owner_or_admin = user_role in models.PRIVILEGED_ROLES
+
+        # Duplicate the document instance
+        link_kwargs = (
+            {
+                "link_reach": document_to_duplicate.link_reach,
+                "link_role": document_to_duplicate.link_role,
             }
+            if with_accesses
+            else {}
+        )
+        if new_parent is None:
+            # Only the top duplicate is marked as a copy, at the end of its title
+            # so that a leading emoji, used as the document icon, stays first.
+            title = (
+                self._get_copy_title(document_to_duplicate.title)
+                if document_to_duplicate.title
+                else _("Untitled document (copy)")
+            )
+        else:
+            # Descendants keep their title untouched, untitled ones included
+            title = document_to_duplicate.title
+        # If parent_duplicate is provided we must add the duplicated document as a child.
+        # No retry here: the parent was created by this very transaction, nobody
+        # else can add children under it, so its child paths cannot collide
+        if new_parent is not None:
+            duplicated_document = new_parent.add_child(
+                title=title,
+                attachments=[],
+                duplicated_from=document_to_duplicate,
+                creator=user,
+                **link_kwargs,
+            )
+
+            # Handle access duplication for this child
+            if with_accesses and is_owner_or_admin:
+                original_accesses = models.DocumentAccess.objects.filter(
+                    document=document_to_duplicate
+                ).exclude(user=user)
+
+                accesses_to_create = [
+                    models.DocumentAccess(
+                        document=duplicated_document,
+                        user_id=access.user_id,
+                        team=access.team,
+                        role=access.role,
+                    )
+                    for access in original_accesses
+                ]
+
+                if accesses_to_create:
+                    models.DocumentAccess.objects.bulk_create(accesses_to_create)
+
+        elif not document_to_duplicate.is_root() and choices.RoleChoices.get_priority(
+            user_role
+        ) < choices.RoleChoices.get_priority(models.RoleChoices.EDITOR):
+            duplicated_document = create_tree_node_with_retry(
+                lambda: models.Document.add_root(
+                    creator=user,
+                    title=title,
+                    attachments=[],
+                    duplicated_from=document_to_duplicate,
+                    **link_kwargs,
+                )
+            )
+            models.DocumentAccess.objects.create(
+                document=duplicated_document,
+                user=user,
+                role=models.RoleChoices.OWNER,
+            )
+        else:
+            # Treebeard computes the path of the new sibling from the current
+            # last one: two requests creating a node at the same level at the
+            # same time compute the same path, the loser retries with a fresh one
+            duplicated_document = create_tree_node_with_retry(
+                lambda: document_to_duplicate.add_sibling(
+                    "last-sibling",
+                    title=title,
+                    attachments=[],
+                    duplicated_from=document_to_duplicate,
+                    creator=user,
+                    **link_kwargs,
+                )
+            )
+
+            # Always add the logged-in user as OWNER for root documents
+            if document_to_duplicate.is_root():
+                accesses_to_create = [
+                    models.DocumentAccess(
+                        document=duplicated_document,
+                        user=user,
+                        role=models.RoleChoices.OWNER,
+                    )
+                ]
+
+                # If accesses should be duplicated,
+                # add other users' accesses as per original document
+                if with_accesses and is_owner_or_admin:
+                    original_accesses = models.DocumentAccess.objects.filter(
+                        document=document_to_duplicate
+                    ).exclude(user=user)
+
+                    accesses_to_create.extend(
+                        models.DocumentAccess(
+                            document=duplicated_document,
+                            user_id=access.user_id,
+                            team=access.team,
+                            role=access.role,
+                        )
+                        for access in original_accesses
+                    )
+
+                # Bulk create all the duplicated accesses
+                models.DocumentAccess.objects.bulk_create(accesses_to_create)
+
+        duplicates = [(document_to_duplicate, duplicated_document)]
+
+        if with_descendants:
+            for child in document_to_duplicate.get_children().filter(
+                ancestors_deleted_at__isnull=True
+            ):
+                # When duplicating descendants, attach duplicates under the
+                # duplicated_document. Indexed rather than unpacked: `_` is the
+                # gettext alias in this scope, binding anything to it here makes
+                # every `_()` above raise UnboundLocalError.
+                children_duplicates = self._duplicate_document_structure(
+                    document_to_duplicate=child,
+                    serializer=serializer,
+                    user=user,
+                    new_parent=duplicated_document,
+                )[1]
+                duplicates += children_duplicates
+
+        return duplicated_document, duplicates
+
+    def _duplicate_documents_content(self, duplicates, user):
+        """
+        Seed each duplicated document with the content of its source.
+
+        `duplicates` holds the (source, duplicate) pairs of a duplication in
+        creation order, the duplicate of the root first. It runs once the
+        transaction that created the duplicates is committed, so no call to
+        the collaboration server is ever made with a transaction held open.
+
+        A failure undoes the whole duplication: what was seeded on the
+        collaboration server is deleted — its deletion is idempotent and never
+        refused — and the duplicates are removed from the database, so neither
+        side is left with an orphan.
+        """
+        service = YHubService(user=user)
+        seeded = []
+        try:
+            for source, duplicated in duplicates:
+                try:
+                    update = service.get_ydoc(source)
+                except YHubError as err:
+                    logger.error(
+                        "could not fetch the content of document %s with error: %s",
+                        source.id,
+                        err,
+                    )
+                    raise drf.exceptions.APIException(
+                        "Failed to fetch the document content"
+                    ) from err
+
+                if not update:
+                    continue
+
+                seeded.append(duplicated)
+                try:
+                    service.create_ydoc(duplicated, update)
+                except YHubError as err:
+                    # 409 included: the duplicate was created moments ago with
+                    # a fresh id, content on the collaboration server for it
+                    # is not a state this flow can reach — a 409 says content
+                    # exists, nothing about it being the source's, and a 201
+                    # served on top of unknown content would be a lie.
+                    # Whatever it is, it undoes the duplication.
+                    logger.error(
+                        "could not copy the content into document %s with error: %s",
+                        duplicated.id,
+                        err,
+                    )
+                    raise drf.exceptions.APIException(
+                        "Failed to duplicate the document content"
+                    ) from err
+
+                # The attachments the content refers to are the ones the
+                # duplicate allows a cross-access to
+                extracted_attachments = set(extract_attachments_from_update(update))
+                duplicated.attachments = list(
+                    extracted_attachments & set(source.attachments)
+                )
+
+            models.Document.objects.bulk_update(seeded, ["attachments"])
+        except Exception:
+            # a saga must compensate on any failure, expected or not: whatever
+            # escapes the seeding of a subtree undoes the whole duplication
+            self._compensate_duplication(service, seeded, duplicates[0][1])
+            raise
+
+    @staticmethod
+    def _compensate_duplication(service, seeded, duplicated_root):
+        """
+        Undo a failed duplication.
+
+        What was seeded on the collaboration server is deleted first, then the
+        duplicated documents themselves: a deleted document answers 404 there,
+        so no editor can ever open a duplicate the database no longer holds.
+        A deletion the collaboration server cannot honour is logged rather
+        than raised, the duplicated documents must go down all the same.
+        """
+        for document in seeded:
+            try:
+                service.delete_ydoc(document)
+            except YHubError:
+                logger.exception(
+                    "could not delete the content of duplicated document %s "
+                    "from the collaboration server",
+                    document.id,
+                )
+
+        duplicated_root.delete()
+
+    @drf.decorators.action(detail=False, methods=["get"], url_path="search")
+    @utils.conditional_refresh_oidc_token
+    def search(self, request, *args, **kwargs):
+        """
+        Returns an ordered list of documents best matching the search query parameter 'q'.
+
+        It depends on a search configurable Search Indexer. If no Search Indexer is configured
+        or if it is not reachable, the function falls back to a basic title search.
+        """
+        params = serializers.SearchQueryParamDocumentSerializer(
+            data=request.query_params
+        )
+        params.is_valid(raise_exception=True)
+        search_type = self._get_search_type()
+        if search_type == SearchType.TITLE:
+            return self._search_using_database(
+                request, params.validated_data, *args, **kwargs
+            )
+
+        indexer = get_document_indexer()
+        if indexer is None:
+            # fallback on title search if the indexer is not configured
+            return self._search_using_database(
+                request, params.validated_data, *args, **kwargs
+            )
+
+        try:
+            return self._search_using_indexer(
+                indexer, request, params=params, search_type=search_type
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error("Error while searching documents with indexer: %s", e)
+            # fallback on title search if the indexer is not reached
+            return self._search_using_database(
+                request, params.validated_data, *args, **kwargs
+            )
+
+    def _get_search_type(self) -> SearchType:
+        """
+        Returns the search type to use for the search endpoint based on feature flags.
+        If a user has both flags activated the most advanced search is used
+        (HYBRID > FULL_TEXT > TITLE).
+        A user with no flag will default to the basic title search.
+        """
+        if waffle.flag_is_active(self.request, FeatureFlag.FLAG_FIND_HYBRID_SEARCH):
+            return SearchType.HYBRID
+        if waffle.flag_is_active(self.request, FeatureFlag.FLAG_FIND_FULL_TEXT_SEARCH):
+            return SearchType.FULL_TEXT
+        return SearchType.TITLE
+
+    @staticmethod
+    def _search_using_indexer(indexer, request, params, search_type):
+        """
+        Returns a list of documents matching the query (q) according to the configured indexer.
+        """
+        queryset = models.Document.objects.all()
+
+        # The indexer filters descendants by path prefix, so resolve the document
+        # id to its path before querying it.
+        path = None
+        document_id = params.validated_data.get("document")
+        if document_id:
+            try:
+                path = models.Document.objects.get(pk=document_id).values_list(
+                    "path", flat=True
+                )
+            except models.Document.DoesNotExist as exc:
+                raise drf.exceptions.NotFound("Document not found.") from exc
+
+        results = indexer.search(
+            q=params.validated_data["q"],
+            search_type=search_type,
+            token=request.session.get("oidc_access_token"),
+            path=path,
+            visited=get_visited_document_ids_of(queryset, request.user),
+        )
+
+        return drf_response.Response(
+            {
+                "count": len(results),
+                "next": None,
+                "previous": None,
+                "results": results,
+            }
+        )
+
+    def _get_response_for_search_queryset(
+        self, queryset, candidate_parent_paths, resolve_parents
+    ):
+        """
+        Paginate the search results and attach to each document its top parent.
+
+        To avoid loading every accessible root, the top parents are resolved only
+        for the documents on the current page: we determine which candidate parent
+        paths the page actually references, then `resolve_parents` fetches just those.
+
+        Args:
+            queryset: the search result queryset.
+            candidate_parent_paths: iterable of disjoint top-parent path prefixes a
+                result may descend from.
+            resolve_parents: callable taking the set of parent paths referenced by the
+                current page and returning a ``{path: Document}`` mapping.
+        """
+        page = self.paginate_queryset(queryset)
+        documents = list(page if page else queryset)
+
+        candidate_parent_paths = set(candidate_parent_paths)
+        # Candidate roots are disjoint prefixes, so at most one is a prefix of a
+        # given document path. We only need to test the few distinct prefix lengths.
+        prefix_lengths = sorted({len(path) for path in candidate_parent_paths})
+
+        document_parent_path = {}
+        referenced_paths = set()
+        for document in documents:
+            for length in prefix_lengths:
+                candidate = document.path[:length]
+                if candidate != document.path and candidate in candidate_parent_paths:
+                    document_parent_path[document.path] = candidate
+                    referenced_paths.add(candidate)
+                    break
+
+        parents_by_path = resolve_parents(referenced_paths) if referenced_paths else {}
+
+        for document in documents:
+            document.parent = parents_by_path.get(
+                document_parent_path.get(document.path)
+            )
+
+        serializer = self.get_serializer(documents, many=True)
+
+        if page is None:
+            return drf.response.Response(serializer.data)
+
+        return self.get_paginated_response(serializer.data)
+
+    def _search_using_database(self, request, validated_data, *args, **kwargs):
+        """
+        Fallback search method when no indexer is configured.
+        Only searches in the title field of documents.
+        """
+
+        if validated_data.get("document"):
+            return self._list_descendants(request, validated_data)
+
+        top_level_documents = self.get_queryset()
+        queryset = self.queryset
+        user = request.user
+
+        filterset = DocumentFilter(request.GET, queryset=queryset, request=request)
+        if not filterset.is_valid():
+            raise drf.exceptions.ValidationError(filterset.errors)
+
+        # Among the results, we may have documents that are ancestors/descendants
+        # of each other. In this case we want to keep only the highest ancestors.
+        root_paths = utils.filter_root_paths(
+            top_level_documents.order_by("path").values_list("path", flat=True),
+            skip_sorting=True,
+        )
+
+        if not root_paths:
+            return self.get_response_for_queryset(top_level_documents.none())
+
+        path_list = db.Q()
+        for top_level_document in root_paths:
+            path_list |= db.Q(path__startswith=top_level_document)
+
+        # Lazy queryset used to fetch only the top parents referenced by the page.
+        parents_queryset = (
+            queryset.filter(ancestors_deleted_at__isnull=True)
+            .annotate_user_roles(user)
+            .annotate_is_favorite(user)
+            .annotate_user_has_link_trace(user)
+        )
+
+        queryset = (
+            queryset.filter(path_list)
+            .filter(ancestors_deleted_at__isnull=True)
+            .annotate_user_roles(user)
+            .annotate_is_favorite(user)
+            .annotate_user_has_link_trace(user)
+        )
+
+        queryset = filterset.filter_queryset(queryset)
+
+        # Apply ordering only now that everything is filtered and annotated
+        queryset = filters.OrderingFilter().filter_queryset(
+            self.request, queryset, self
+        )
+
+        return self._get_response_for_search_queryset(
+            queryset,
+            root_paths,
+            lambda paths: {
+                doc.path: doc for doc in parents_queryset.filter(path__in=paths)
+            },
+        )
+
+    def _list_descendants(self, request, validated_data):
+        """
+        List all documents descending from the document identified by the provided
+        document id. Includes the parent document itself.
+        Used internally by the search endpoint when document filtering is requested.
+        """
+        # Get parent document without access filtering
+        document_id = validated_data["document"]
+        user = request.user
+        try:
+            parent = (
+                models.Document.objects.annotate_user_roles(user)
+                .annotate_is_favorite(user)
+                .annotate_user_has_link_trace(user)
+                .get(pk=document_id)
+            )
+        except models.Document.DoesNotExist as exc:
+            raise drf.exceptions.NotFound("Document not found.") from exc
+
+        abilities = parent.get_abilities(user)
+        if not abilities.get("search"):
+            raise drf.exceptions.PermissionDenied(
+                "You do not have permission to search within this document."
+            )
+
+        # Get descendants and include the parent, ordered by path
+        queryset = (
+            parent.get_descendants(include_self=True)
+            .filter(ancestors_deleted_at__isnull=True)
+            .order_by("path")
+        )
+        queryset = self.filter_queryset(queryset)
+
+        # filter by title
+        filterset = DocumentFilter(request.GET, queryset=queryset)
+        if not filterset.is_valid():
+            raise drf.exceptions.ValidationError(filterset.errors)
+
+        queryset = filterset.qs
+        # Every descendant's top parent is the search root itself; reuse the already
+        # fetched (and annotated) parent object instead of querying it again.
+        return self._get_response_for_search_queryset(
+            queryset,
+            [parent.path],
+            lambda paths: {parent.path: parent},
         )
 
     @drf.decorators.action(detail=True, methods=["put"], url_path="link-configuration")
@@ -545,10 +1939,9 @@ class DocumentViewSet(
         )
         serializer.is_valid(raise_exception=True)
 
-        serializer.save()
-
-        # Notify collaboration server about the link updated
-        CollaborationService().reset_connections(str(document.id))
+        # saving a changed link definition is what tells the collaboration
+        # server to re-check the connections of the document and its descendants
+        serializer.save(update_fields=["link_reach", "link_role", "updated_at"])
 
         return drf.response.Response(serializer.data, status=drf.status.HTTP_200_OK)
 
@@ -570,6 +1963,8 @@ class DocumentViewSet(
                     {"detail": "Document already marked as favorite"},
                     status=drf.status.HTTP_200_OK,
                 )
+
+            posthog_capture(PosthogEventName.DOC_FAVORITED, user, {}, document=document)
             return drf.response.Response(
                 {"detail": "Document marked as favorite"},
                 status=drf.status.HTTP_201_CREATED,
@@ -580,13 +1975,40 @@ class DocumentViewSet(
             document=document, user=user
         ).delete()
         if deleted:
-            return drf.response.Response(
-                {"detail": "Document unmarked as favorite"},
-                status=drf.status.HTTP_204_NO_CONTENT,
-            )
+            return drf.response.Response(status=drf.status.HTTP_204_NO_CONTENT)
         return drf.response.Response(
             {"detail": "Document was already not marked as favorite"},
             status=drf.status.HTTP_200_OK,
+        )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["post"],
+        url_path="mention",
+        throttle_scope="mention",
+    )
+    def mention(self, request, *args, **kwargs):
+        """Mention a user on the document and notify them by email.
+
+        The mention record is created synchronously; the email notification is
+        sent asynchronously by a Celery task, which suppresses it when the same
+        user was already notified in the same context (document body or thread)
+        within the cooldown period.
+        """
+        # Check permissions first
+        document = self.get_object()
+
+        serializer = serializers.MentionSerializer(
+            data=request.data,
+            context={**self.get_serializer_context(), "document": document},
+        )
+        serializer.is_valid(raise_exception=True)
+        mention = serializer.save(document=document, mentioned_by_user=request.user)
+
+        send_mention_notification_mail.delay(str(mention.id))
+
+        return drf.response.Response(
+            serializer.data, status=drf.status.HTTP_201_CREATED
         )
 
     @drf.decorators.action(detail=True, methods=["post"], url_path="attachment-upload")
@@ -601,30 +2023,80 @@ class DocumentViewSet(
 
         # Generate a generic yet unique filename to store the image in object storage
         file_id = uuid.uuid4()
-        extension = serializer.validated_data["expected_extension"]
-        key = f"{document.key_base}/{ATTACHMENTS_FOLDER:s}/{file_id!s}.{extension:s}"
+        ext = serializer.validated_data["expected_extension"]
 
         # Prepare metadata for storage
-        extra_args = {"Metadata": {"owner": str(request.user.id)}}
+        extra_args = {
+            "Metadata": {
+                "owner": str(request.user.id),
+                "status": enums.DocumentAttachmentStatus.PROCESSING.value,
+            },
+            "ContentType": serializer.validated_data["content_type"],
+        }
+        file_unsafe = ""
         if serializer.validated_data["is_unsafe"]:
             extra_args["Metadata"]["is_unsafe"] = "true"
+            file_unsafe = "-unsafe"
+
+        key = f"{document.key_base}/{enums.ATTACHMENTS_FOLDER:s}/{file_id!s}{file_unsafe}.{ext:s}"
+
+        file_name = serializer.validated_data["file_name"]
+        if (
+            not serializer.validated_data["content_type"].startswith("image/")
+            or serializer.validated_data["is_unsafe"]
+        ):
+            extra_args.update(
+                {
+                    "ContentDisposition": content_disposition_header(
+                        as_attachment=True, filename=file_name
+                    )
+                }
+            )
+        else:
+            extra_args.update(
+                {
+                    "ContentDisposition": content_disposition_header(
+                        as_attachment=False, filename=file_name
+                    )
+                }
+            )
 
         file = serializer.validated_data["file"]
         default_storage.connection.meta.client.upload_fileobj(
             file, default_storage.bucket_name, key, ExtraArgs=extra_args
         )
 
+        # Make the attachment readable by document readers
+        document.attachments.append(key)
+        # Only the attachments column is written: the instance was loaded at the
+        # start of the request and an overlapping change must not be undone
+        # (e.g. a withdrawal of the link configuration committed in between).
+        document.save(update_fields=["attachments", "updated_at"])
+
+        malware_detection.analyse_file(key, document_id=document.id)
+
+        url = reverse(
+            "documents-media-check",
+            kwargs={"pk": document.id},
+        )
+        parameters = urlencode({"key": key})
+
         return drf.response.Response(
-            {"file": f"{settings.MEDIA_URL:s}{key:s}"},
+            {
+                "file": f"{url:s}?{parameters:s}",
+            },
             status=drf.status.HTTP_201_CREATED,
         )
 
-    def _authorize_subrequest(self, request, pattern):
+    def _auth_get_original_url(self, request):
         """
-        Shared method to authorize access based on the original URL of an Nginx subrequest
-        and user permissions. Returns a dictionary of URL parameters if authorized.
+        Extracts and parses the original URL from the configured parameter header.
+        Raises PermissionDenied if the header is missing.
 
-        The original url is passed by nginx in the "HTTP_X_ORIGINAL_URL" header.
+        The original url is passed by reverse proxy in the header specified by the
+        MEDIA_AUTH_ORIGINAL_URL_HEADER setting.
+
+        For nginx (the default) this is set to HTTP_X_ORIGINAL_URL.
         See corresponding ingress configuration in Helm chart and read about the
         nginx.ingress.kubernetes.io/auth-url annotation to understand how the Nginx ingress
         is configured to do this.
@@ -633,68 +2105,39 @@ class DocumentViewSet(
         to let this request go through (by returning a 200 code) or if we block it (by returning
         a 403 error). Note that we return 403 errors without any further details for security
         reasons.
-
-        Parameters:
-        - pattern: The regex pattern to extract identifiers from the URL.
-
-        Returns:
-        - A dictionary of URL parameters if the request is authorized.
-        Raises:
-        - PermissionDenied if authorization fails.
         """
         # Extract the original URL from the request header
-        original_url = request.META.get("HTTP_X_ORIGINAL_URL")
+        original_url = request.META.get(settings.MEDIA_AUTH_ORIGINAL_URL_HEADER)
         if not original_url:
-            logger.debug("Missing HTTP_X_ORIGINAL_URL header in subrequest")
-            raise drf.exceptions.PermissionDenied()
-
-        parsed_url = urlparse(original_url)
-        match = pattern.search(parsed_url.path)
-
-        # If the path does not match the pattern, try to extract the parameters from the query
-        if not match:
-            match = pattern.search(parsed_url.query)
-
-        if not match:
             logger.debug(
-                "Subrequest URL '%s' did not match pattern '%s'",
-                parsed_url.path,
-                pattern,
+                "Missing %s header in subrequest. "
+                "Maybe you need to set MEDIA_AUTH_ORIGINAL_URL_HEADER correctly for your ingress"
+                " proxy.",
+                settings.MEDIA_AUTH_ORIGINAL_URL_HEADER,
             )
             raise drf.exceptions.PermissionDenied()
 
+        logger.debug("Original url: '%s'", original_url)
+        return urlparse(original_url)
+
+    def _auth_get_url_params(self, pattern, fragment):
+        """
+        Extracts URL parameters from the given fragment using the specified regex pattern.
+        Raises PermissionDenied if parameters cannot be extracted.
+        """
+        match = pattern.search(fragment)
         try:
-            url_params = match.groupdict()
+            return match.groupdict()
         except (ValueError, AttributeError) as exc:
             logger.debug("Failed to extract parameters from subrequest URL: %s", exc)
             raise drf.exceptions.PermissionDenied() from exc
 
-        pk = url_params.get("pk")
-        if not pk:
-            logger.debug("Document ID (pk) not found in URL parameters: %s", url_params)
-            raise drf.exceptions.PermissionDenied()
-
-        # Fetch the document and check if the user has access
-        try:
-            document = models.Document.objects.get(pk=pk)
-        except models.Document.DoesNotExist as exc:
-            logger.debug("Document with ID '%s' does not exist", pk)
-            raise drf.exceptions.PermissionDenied() from exc
-
-        user_abilities = document.get_abilities(request.user)
-
-        if not user_abilities.get(self.action, False):
-            logger.debug(
-                "User '%s' lacks permission for document '%s'", request.user, pk
-            )
-            raise drf.exceptions.PermissionDenied()
-
-        logger.debug(
-            "Subrequest authorization successful. Extracted parameters: %s", url_params
-        )
-        return url_params, user_abilities, request.user.id
-
-    @drf.decorators.action(detail=False, methods=["get"], url_path="media-auth")
+    @drf.decorators.action(
+        detail=False,
+        methods=["get"],
+        url_path="media-auth",
+        throttle_scope="media_auth",
+    )
     def media_auth(self, request, *args, **kwargs):
         """
         This view is used by an Nginx subrequest to control access to a document's
@@ -705,35 +2148,167 @@ class DocumentViewSet(
         annotation. The request will then be proxied to the object storage backend who will
         respond with the file after checking the signature included in headers.
         """
-        url_params, _, _ = self._authorize_subrequest(
-            request, MEDIA_STORAGE_URL_PATTERN
+        parsed_url = self._auth_get_original_url(request)
+        url_params = self._auth_get_url_params(
+            enums.MEDIA_STORAGE_URL_PATTERN, parsed_url.path
         )
-        pk, key = url_params.values()
+
+        user = request.user
+        key = f"{url_params['pk']:s}/{url_params['attachment']:s}"
+
+        # Look for a document to which the user has access and that includes this
+        # attachment. Access is granted when the document holding the attachment,
+        # or any of its ancestors, is readable per se by the user.
+        #
+        # We answer this without materialising the user's whole readable set:
+        #   1. find the document(s) that hold this key (indexed by the GIN index
+        #      on `attachments`);
+        #   2. expand each to its own path plus every ancestor prefix -- pure
+        #      string slicing, no query, bounded by tree depth
+        #      (<= len(path) / steplen);
+        #   3. ask a single indexed EXISTS whether any of those candidate paths
+        #      is readable per se by this user, right now.
+        # "descendant-or-self of a readable node" and "ancestor-or-self is
+        # readable" are converses over the same fixed-width prefix relation, so
+        # this yields the exact same decision as scanning every readable path.
+        # NOTE: like the previous implementation, `self.queryset` here does not
+        # filter out soft-deleted (ancestors_deleted_at) documents, so a
+        # soft-deleted ancestor still grants access. Behaviour preserved on
+        # purpose; revisit separately if that is not intended.
+        attachment_paths = list(
+            self.queryset.select_related(None)
+            .filter(attachments__contains=[key])
+            .values_list("path", flat=True)
+        )
+
+        candidate_paths = {
+            path[:pos]
+            for path in attachment_paths
+            for pos in range(len(path), 0, -models.Document.steplen)
+        }
+
+        if not candidate_paths or not (
+            self.queryset.readable_per_se(user)
+            .filter(path__in=candidate_paths)
+            .exists()
+        ):
+            logger.debug("User '%s' lacks permission for attachment", user)
+            raise drf.exceptions.PermissionDenied()
+
+        # Check if the attachment is ready. Use the process-global S3 client
+        # (see core.utils.s3): django-storages caches its client per thread, so
+        # relying on default_storage.connection here rebuilds the boto3 client
+        # on every fresh thread -- profiling showed that client construction,
+        # not the DB, dominated this endpoint's CPU under load.
+        s3_client = get_s3_client()
+        bucket_name = default_storage.bucket_name
+        try:
+            head_resp = s3_client.head_object(Bucket=bucket_name, Key=key)
+        except ClientError as err:
+            raise drf.exceptions.PermissionDenied() from err
+        metadata = lowercase_keys(head_resp.get("Metadata", {}))
+        # In order to be compatible with existing upload without `status` metadata,
+        # we consider them as ready.
+        if (
+            metadata.get("status", enums.DocumentAttachmentStatus.READY)
+            != enums.DocumentAttachmentStatus.READY
+        ):
+            raise drf.exceptions.PermissionDenied()
 
         # Generate S3 authorization headers using the extracted URL parameters
-        request = utils.generate_s3_authorization_headers(f"{pk:s}/{key:s}")
+        request = utils.generate_s3_authorization_headers(key)
 
         return drf.response.Response("authorized", headers=request.headers, status=200)
 
-    @drf.decorators.action(detail=False, methods=["get"], url_path="collaboration-auth")
-    def collaboration_auth(self, request, *args, **kwargs):
+    @drf.decorators.action(detail=True, methods=["get"], url_path="media-check")
+    def media_check(self, request, *args, **kwargs):
         """
-        This view is used by an Nginx subrequest to control access to a document's
-        collaboration server.
+        Check if the media is ready to be served.
         """
-        _, user_abilities, user_id = self._authorize_subrequest(
-            request, COLLABORATION_WS_URL_PATTERN
-        )
-        can_edit = user_abilities["partial_update"]
+        document = self.get_object()
 
-        # Add the collaboration server secret token to the headers
-        headers = {
-            "Authorization": settings.COLLABORATION_SERVER_SECRET,
-            "X-Can-Edit": str(can_edit),
-            "X-User-Id": str(user_id),
+        key = request.query_params.get("key")
+        if not key:
+            return drf.response.Response(
+                {"detail": "Missing 'key' query parameter"},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        if key not in document.attachments:
+            return drf.response.Response(
+                {"detail": "Attachment missing"},
+                status=drf.status.HTTP_404_NOT_FOUND,
+            )
+
+        # Check if the attachment is ready
+        s3_client = default_storage.connection.meta.client
+        bucket_name = default_storage.bucket_name
+        try:
+            head_resp = s3_client.head_object(Bucket=bucket_name, Key=key)
+        except ClientError as err:
+            logger.error("Client Error fetching file %s metadata: %s", key, err)
+            return drf.response.Response(
+                {"detail": "Media not found"},
+                status=drf.status.HTTP_404_NOT_FOUND,
+            )
+        metadata = lowercase_keys(head_resp.get("Metadata", {}))
+
+        body = {
+            "status": metadata.get("status", enums.DocumentAttachmentStatus.PROCESSING),
         }
+        if metadata.get("status") == enums.DocumentAttachmentStatus.READY:
+            body = {
+                "status": enums.DocumentAttachmentStatus.READY,
+                "file": f"{settings.MEDIA_URL:s}{key:s}",
+            }
 
-        return drf.response.Response("authorized", headers=headers, status=200)
+        return drf.response.Response(body, status=drf.status.HTTP_200_OK)
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["post"],
+        name="Proxy AI requests to the AI provider",
+        url_path="ai-proxy",
+        throttle_classes=[utils.AIDocumentRateThrottle, utils.AIUserRateThrottle],
+    )
+    def ai_proxy(self, request, *args, **kwargs):
+        """
+        POST /api/v1.0/documents/<resource_id>/ai-proxy
+        Proxy AI requests to the configured AI provider.
+        This endpoint forwards requests to the AI provider and returns the complete response.
+        """
+        # Check permissions first
+        document = self.get_object()
+
+        if not settings.AI_FEATURE_ENABLED or not settings.AI_FEATURE_BLOCKNOTE_ENABLED:
+            raise ValidationError("AI feature is not enabled.")
+
+        ai_service = AIService()
+
+        try:
+            stream = ai_service.stream(request)
+        except PydanticValidationError as err:
+            logger.info("pydantic validation error: %s", err)
+            return drf.response.Response(
+                {"detail": "Invalid submitted payload"},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        posthog_capture(
+            PosthogEventName.DOC_AI_ACTION,
+            request.user,
+            {"method": "ai_proxy"},
+            document=document,
+        )
+
+        return StreamingHttpResponse(
+            stream,
+            content_type="text/event-stream",
+            headers={
+                "x-vercel-ai-data-stream": "v1",  # This header is used for Vercel AI streaming,
+                "X-Accel-Buffering": "no",  # Prevent nginx buffering
+            },
+        )
 
     @drf.decorators.action(
         detail=True,
@@ -751,7 +2326,10 @@ class DocumentViewSet(
         Return JSON response with the processed text.
         """
         # Check permissions first
-        self.get_object()
+        document = self.get_object()
+
+        if not settings.AI_FEATURE_ENABLED or not settings.AI_FEATURE_LEGACY_ENABLED:
+            raise ValidationError("AI feature is not enabled.")
 
         serializer = serializers.AITransformSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -759,7 +2337,14 @@ class DocumentViewSet(
         text = serializer.validated_data["text"]
         action = serializer.validated_data["action"]
 
-        response = AIService().transform(text, action)
+        response = get_legacy_ai_service().transform(text, action)
+
+        posthog_capture(
+            PosthogEventName.DOC_AI_ACTION,
+            request.user,
+            {"method": "ai_transform", "action": action},
+            document=document,
+        )
 
         return drf.response.Response(response, status=drf.status.HTTP_200_OK)
 
@@ -767,7 +2352,6 @@ class DocumentViewSet(
         detail=True,
         methods=["post"],
         name="Translate a piece of text with AI",
-        serializer_class=serializers.AITranslateSerializer,
         url_path="ai-translate",
         throttle_classes=[utils.AIDocumentRateThrottle, utils.AIUserRateThrottle],
     )
@@ -780,7 +2364,10 @@ class DocumentViewSet(
         Return JSON response with the translated text.
         """
         # Check permissions first
-        self.get_object()
+        document = self.get_object()
+
+        if not settings.AI_FEATURE_ENABLED or not settings.AI_FEATURE_LEGACY_ENABLED:
+            raise ValidationError("AI feature is not enabled.")
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -788,19 +2375,305 @@ class DocumentViewSet(
         text = serializer.validated_data["text"]
         language = serializer.validated_data["language"]
 
-        response = AIService().translate(text, language)
+        response = get_legacy_ai_service().translate(text, language)
+
+        posthog_capture(
+            PosthogEventName.DOC_AI_ACTION,
+            request.user,
+            {"method": "ai_translate", "language": language},
+            document=document,
+        )
 
         return drf.response.Response(response, status=drf.status.HTTP_200_OK)
+
+    def _reject_invalid_ips(self, ips):
+        """
+        Check if an IP address is safe from SSRF attacks.
+
+        Raises:
+            drf.exceptions.ValidationError: If the IP is unsafe
+        """
+        for ip in ips:
+            # Block loopback addresses (check before private,
+            # as 127.0.0.1 might be considered private)
+            if ip.is_loopback:
+                raise drf.exceptions.ValidationError(
+                    "Access to loopback addresses is not allowed"
+                )
+
+            # Block link-local addresses (169.254.0.0/16) - check before private
+            if ip.is_link_local:
+                raise drf.exceptions.ValidationError(
+                    "Access to link-local addresses is not allowed"
+                )
+
+            # Block private IP ranges
+            if ip.is_private:
+                raise drf.exceptions.ValidationError(
+                    "Access to private IP addresses is not allowed"
+                )
+
+            # Block multicast addresses
+            if ip.is_multicast:
+                raise drf.exceptions.ValidationError(
+                    "Access to multicast addresses is not allowed"
+                )
+
+            # Block reserved addresses (including 0.0.0.0)
+            if ip.is_reserved:
+                raise drf.exceptions.ValidationError(
+                    "Access to reserved IP addresses is not allowed"
+                )
+
+    def _validate_url_against_ssrf(self, url):
+        """
+        Validate that a URL is safe from SSRF (Server-Side Request Forgery) attacks.
+
+        Blocks:
+        - localhost and its variations
+        - Private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+        - Link-local addresses (169.254.0.0/16)
+        - Loopback addresses
+
+        Raises:
+            drf.exceptions.ValidationError: If the URL is unsafe
+        """
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+
+        if not hostname:
+            raise drf.exceptions.ValidationError("Invalid hostname")
+
+        # Resolve hostname to IP address(es)
+        # Check all resolved IPs to prevent DNS rebinding attacks
+        try:
+            # Try to parse as IP address first (if hostname is already an IP)
+            try:
+                ip = ipaddress.ip_address(hostname)
+                resolved_ips = [ip]
+            except ValueError:
+                # Resolve hostname to IP addresses (supports both IPv4 and IPv6)
+                resolved_ips = []
+                try:
+                    # Get all address info (IPv4 and IPv6)
+                    addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+                    for family, _, _, _, sockaddr in addr_info:
+                        if family == socket.AF_INET:
+                            # IPv4
+                            ip = ipaddress.ip_address(sockaddr[0])
+                            resolved_ips.append(ip)
+                        elif family == socket.AF_INET6:
+                            # IPv6
+                            ip = ipaddress.ip_address(sockaddr[0])
+                            resolved_ips.append(ip)
+                except (socket.gaierror, OSError) as e:
+                    raise drf.exceptions.ValidationError(
+                        f"Failed to resolve hostname: {str(e)}"
+                    ) from e
+
+                if not resolved_ips:
+                    raise drf.exceptions.ValidationError(
+                        "No IP addresses found for hostname"
+                    ) from None
+        except ValueError as e:
+            raise drf.exceptions.ValidationError(f"Invalid IP address: {str(e)}") from e
+
+        # Check all resolved IPs to ensure none are private/internal
+        self._reject_invalid_ips(resolved_ips)
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["get"],
+        name="",
+        url_path="cors-proxy",
+    )
+    @csp_update({"img-src": [NONE, "data:"]})
+    def cors_proxy(self, request, *args, **kwargs):
+        """
+        GET /api/v1.0/documents/<resource_id>/cors-proxy
+        Act like a proxy to fetch external resources and bypass CORS restrictions.
+        """
+        url = request.query_params.get("url", "").strip()
+        if not url:
+            return drf.response.Response(
+                {"detail": "Missing 'url' query parameter"},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Check for permissions.
+        self.get_object()
+
+        url = unquote(url)
+
+        url_validator = URLValidator(schemes=["http", "https"])
+        try:
+            url_validator(url)
+        except ValidationError as e:
+            return drf.response.Response(
+                {"detail": str(e)},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate URL against SSRF attacks
+        try:
+            self._validate_url_against_ssrf(url)
+        except drf.exceptions.ValidationError as e:
+            logger.error("Potential SSRF attack detected: %s", e)
+            return drf.response.Response(
+                {"detail": "Invalid URL used."},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            response = requests.get(
+                url,
+                stream=True,
+                headers={
+                    "User-Agent": request.headers.get("User-Agent", ""),
+                    "Accept": request.headers.get("Accept", ""),
+                },
+                allow_redirects=False,
+                timeout=10,
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "")
+
+            if not content_type.startswith("image/"):
+                return drf.response.Response(
+                    {"detail": "Invalid URL used."}, status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Use StreamingHttpResponse with the response's iter_content to properly stream the data
+            proxy_response = StreamingHttpResponse(
+                streaming_content=response.iter_content(chunk_size=8192),
+                content_type=content_type,
+                headers={
+                    "Content-Disposition": "attachment;",
+                },
+                status=response.status_code,
+            )
+
+            return proxy_response
+
+        except requests.RequestException as e:
+            logger.exception(e)
+            return drf.response.Response(
+                {"detail": "Invalid URL used."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["get"],
+        url_path="formatted-content",
+        name="Convert document content to different formats",
+    )
+    def formatted_content(self, request, pk=None):
+        """
+        Retrieve document content in different formats (JSON, Markdown, HTML).
+
+        Query parameters:
+        - content_format: The desired output format (json, markdown, html)
+
+        Returns:
+            JSON response with content in the specified format.
+        """
+
+        document = self.get_object()
+
+        content_format = request.query_params.get("content_format", "json").lower()
+        if content_format not in {"json", "markdown", "html"}:
+            raise drf.exceptions.ValidationError(
+                "Invalid format. Must be one of: json, markdown, html"
+            )
+
+        # Get the content from the collaboration server, it is the source of
+        # truth for it
+        try:
+            update = YHubService(user=request.user).get_ydoc(document)
+        except YHubError as e:
+            logger.error("Error getting content for document %s: %s", pk, e)
+            return drf_response.Response(
+                {"error": "Failed to get document content"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        content = None
+        if update is not None:
+            # Convert using the y-provider service
+            try:
+                yprovider = Converter()
+                result = yprovider.convert(
+                    update,
+                    mime_types.YJS,
+                    {
+                        "markdown": mime_types.MARKDOWN,
+                        "html": mime_types.HTML,
+                        "json": mime_types.JSON,
+                    }[content_format],
+                )
+                content = result
+            except YProviderValidationError as e:
+                return drf_response.Response(
+                    {"error": str(e)}, status=status.HTTP_400_BAD_REQUEST
+                )
+            except YProviderServiceUnavailableError as e:
+                logger.error("Error getting content for document %s: %s", pk, e)
+                return drf_response.Response(
+                    {"error": "Failed to get document content"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        return drf_response.Response(
+            {
+                "id": str(document.id),
+                "title": document.title,
+                "content": content,
+                "created_at": document.created_at,
+                "updated_at": document.updated_at,
+            }
+        )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["post"],
+    )
+    def leave(self, request, *args, **kwargs):
+        """
+        Remove document_accesses if exists and the link_trace related to the current document
+        for the connected user.
+        """
+        # Check for permissions.
+        document = self.get_object()
+
+        try:
+            with transaction.atomic():
+                models.DocumentAccess.objects.filter(
+                    document__path__startswith=document.path, user=request.user
+                ).delete()
+                models.LinkTrace.objects.filter(
+                    document__path__startswith=document.path, user=request.user
+                ).delete()
+        except DatabaseError:
+            logger.error(
+                "Impossible to leave document %s for user %s",
+                str(document.id),
+                str(request.user.id),
+            )
+            raise
+
+        posthog_capture(PosthogEventName.DOC_LEFT, request.user, {}, document=document)
+
+        return drf.response.Response(status=drf.status.HTTP_204_NO_CONTENT)
 
 
 class DocumentAccessViewSet(
     ResourceAccessViewsetMixin,
     drf.mixins.CreateModelMixin,
-    drf.mixins.DestroyModelMixin,
-    drf.mixins.ListModelMixin,
     drf.mixins.RetrieveModelMixin,
     drf.mixins.UpdateModelMixin,
-    drf.viewsets.GenericViewSet,
+    drf.mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
 ):
     """
     API ViewSet for all interactions with document accesses.
@@ -827,189 +2700,215 @@ class DocumentAccessViewSet(
     """
 
     lookup_field = "pk"
-    pagination_class = Pagination
-    permission_classes = [permissions.IsAuthenticated, permissions.AccessPermission]
-    queryset = models.DocumentAccess.objects.select_related("user").all()
+    permission_classes = [permissions.ResourceAccessPermission]
+    queryset = models.DocumentAccess.objects.select_related("user", "document").only(
+        "id",
+        "created_at",
+        "role",
+        "team",
+        "updated_at",
+        "user__id",
+        "user__short_name",
+        "user__full_name",
+        "user__email",
+        "user__language",
+        "user__is_first_connection",
+        "document__id",
+        "document__path",
+        "document__depth",
+    )
     resource_field_name = "document"
-    serializer_class = serializers.DocumentAccessSerializer
+    throttle_classes = [DocumentAccessThrottle]
+    throttle_scope = "document_access"
 
-    def perform_create(self, serializer):
-        """Add a new access to the document and send an email to the new added user."""
-        access = serializer.save()
-        language = self.request.headers.get("Content-Language", "en-us")
-
-        access.document.send_invitation_email(
-            access.user.email,
-            access.role,
-            self.request.user,
-            language,
-        )
-
-    def perform_update(self, serializer):
-        """Update an access to the document and notify the collaboration server."""
-        access = serializer.save()
-
-        access_user_id = None
-        if access.user:
-            access_user_id = str(access.user.id)
-
-        # Notify collaboration server about the access change
-        CollaborationService().reset_connections(
-            str(access.document.id), access_user_id
-        )
-
-    def perform_destroy(self, instance):
-        """Delete an access to the document and notify the collaboration server."""
-        instance.delete()
-
-        # Notify collaboration server about the access removed
-        CollaborationService().reset_connections(
-            str(instance.document.id), str(instance.user.id)
-        )
-
-
-class TemplateViewSet(
-    drf.mixins.CreateModelMixin,
-    drf.mixins.DestroyModelMixin,
-    drf.mixins.RetrieveModelMixin,
-    drf.mixins.UpdateModelMixin,
-    drf.viewsets.GenericViewSet,
-):
-    """Template ViewSet"""
-
-    filter_backends = [drf.filters.OrderingFilter]
-    permission_classes = [
-        permissions.IsAuthenticatedOrSafe,
-        permissions.AccessPermission,
-    ]
-    ordering = ["-created_at"]
-    ordering_fields = ["created_at", "updated_at", "title"]
-    serializer_class = serializers.TemplateSerializer
-    queryset = models.Template.objects.all()
-
-    def get_queryset(self):
-        """Custom queryset to get user related templates."""
-        queryset = super().get_queryset()
-        user = self.request.user
-
-        if not user.is_authenticated:
-            return queryset
-
-        user_roles_query = (
-            models.TemplateAccess.objects.filter(
-                Q(user=user) | Q(team__in=user.teams),
-                template_id=OuterRef("pk"),
+    @cached_property
+    def document(self):
+        """Get related document from resource ID in url and annotate user roles."""
+        try:
+            return models.Document.objects.annotate_user_roles(self.request.user).get(
+                pk=self.kwargs["resource_id"]
             )
-            .values("template")
-            .annotate(roles_array=ArrayAgg("role"))
-            .values("roles_array")
+        except models.Document.DoesNotExist as excpt:
+            raise drf.exceptions.NotFound() from excpt
+
+    def get_serializer_class(self):
+        """Use light serializer for unprivileged users."""
+        return (
+            serializers.DocumentAccessSerializer
+            if self.document.get_role(self.request.user) in choices.PRIVILEGED_ROLES
+            else serializers.DocumentAccessLightSerializer
         )
-        return queryset.annotate(user_roles=Subquery(user_roles_query)).distinct()
 
     def list(self, request, *args, **kwargs):
-        """Restrict templates returned by the list endpoint"""
-        queryset = self.filter_queryset(self.get_queryset())
-        user = self.request.user
-        if user.is_authenticated:
-            queryset = queryset.filter(
-                db.Q(accesses__user=user)
-                | db.Q(accesses__team__in=user.teams)
-                | db.Q(is_public=True)
+        """Return accesses for the current document with filters and annotations."""
+        user = request.user
+
+        role = self.document.get_role(user)
+        if not role:
+            return drf.response.Response([])
+
+        ancestors = (
+            self.document.get_ancestors()
+            | models.Document.objects.filter(pk=self.document.pk)
+        ).filter(ancestors_deleted_at__isnull=True)
+
+        queryset = self.get_queryset().filter(document__in=ancestors)
+
+        # Readers only see privileged accesses. Users allowed to comment also
+        # see the other roles allowed to comment (with limited user details)
+        # so that they can mention each other. Privileged users see everything.
+        if role not in choices.COMMENTING_ROLES:
+            queryset = queryset.filter(role__in=choices.PRIVILEGED_ROLES)
+        elif role not in choices.PRIVILEGED_ROLES:
+            queryset = queryset.filter(role__in=choices.COMMENTING_ROLES)
+
+        accesses = list(queryset.order_by("document__path"))
+
+        # Annotate more information on roles
+        path_to_key_to_max_ancestors_role = defaultdict(
+            lambda: defaultdict(lambda: None)
+        )
+        path_to_ancestors_roles = defaultdict(list)
+        path_to_role = defaultdict(lambda: None)
+        for access in accesses:
+            key = access.target_key
+            path = access.document.path
+            parent_path = path[: -models.Document.steplen]
+
+            path_to_key_to_max_ancestors_role[path][key] = choices.RoleChoices.max(
+                path_to_key_to_max_ancestors_role[path][key], access.role
             )
-        else:
-            queryset = queryset.filter(is_public=True)
 
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+            if parent_path:
+                path_to_key_to_max_ancestors_role[path][key] = choices.RoleChoices.max(
+                    path_to_key_to_max_ancestors_role[parent_path][key],
+                    path_to_key_to_max_ancestors_role[path][key],
+                )
+                path_to_ancestors_roles[path].extend(
+                    path_to_ancestors_roles[parent_path]
+                )
+                path_to_ancestors_roles[path].append(path_to_role[parent_path])
+            else:
+                path_to_ancestors_roles[path] = []
 
-        serializer = self.get_serializer(queryset, many=True)
-        return drf.response.Response(serializer.data)
+            if access.user_id == user.id or access.team in user.teams:
+                path_to_role[path] = choices.RoleChoices.max(
+                    path_to_role[path], access.role
+                )
+
+        # serialize and return the response
+        context = self.get_serializer_context()
+        serializer_class = self.get_serializer_class()
+        serialized_data = []
+        for access in accesses:
+            path = access.document.path
+            parent_path = path[: -models.Document.steplen]
+            access.max_ancestors_role = (
+                path_to_key_to_max_ancestors_role[parent_path][access.target_key]
+                if parent_path
+                else None
+            )
+            access.set_user_roles_tuple(
+                choices.RoleChoices.max(*path_to_ancestors_roles[path]),
+                path_to_role.get(path),
+            )
+            serializer = serializer_class(access, context=context)
+            serialized_data.append(serializer.data)
+
+        return drf.response.Response(serialized_data)
 
     def perform_create(self, serializer):
-        """Set the current user as owner of the newly created object."""
-        obj = serializer.save()
-        models.TemplateAccess.objects.create(
-            template=obj,
-            user=self.request.user,
-            role=models.RoleChoices.OWNER,
+        """
+        Actually create the new document access:
+        - Ensures the `document_id` is explicitly set from the URL
+        - If the assigned role is `OWNER`, checks that the requesting user is an owner
+          of the document. This is the only permission check deferred until this step;
+          all other access checks are handled earlier in the permission lifecycle.
+        - Sends an invitation email to the newly added user after saving the access.
+        """
+        role = serializer.validated_data.get("role")
+        if (
+            role == choices.RoleChoices.OWNER
+            and self.document.get_role(self.request.user) != choices.RoleChoices.OWNER
+        ):
+            raise drf.exceptions.PermissionDenied(
+                "Only owners of a document can assign other users as owners."
+            )
+
+        access = serializer.save(document_id=self.kwargs["resource_id"])
+
+        posthog_capture(
+            PosthogEventName.DOC_ACCESS_CREATED,
+            self.request.user,
+            {
+                "access_id": str(access.id),
+                "document_id": str(access.document_id),
+                "role": access.role,
+                "created_by": str(self.request.user.id),
+                "access_user_id": str(access.user_id) if access.user else None,
+                "team": access.team or None,
+            },
+        )
+
+        if access.user:
+            access.document.send_invitation_email(
+                access.user.email,
+                access.role,
+                self.request.user,
+                access.user.language
+                or self.request.user.language
+                or settings.LANGUAGE_CODE,
+            )
+
+    def perform_destroy(self, instance):
+        """
+        Delete an access to the document.
+
+        Saving or deleting an access is what notifies the collaboration server,
+        through the signals of the model: nothing to do here beyond deleting.
+        """
+        # Snapshot the identifiers before deletion as Django resets the primary key
+        # on the instance once it is deleted.
+        access_id = str(instance.id)
+        document_id = str(instance.document_id)
+
+        instance.delete()
+
+        posthog_capture(
+            PosthogEventName.DOC_ACCESS_DELETED,
+            self.request.user,
+            {"access_id": access_id, "document_id": document_id},
         )
 
     @drf.decorators.action(
-        detail=True,
-        methods=["post"],
-        url_path="generate-document",
-        permission_classes=[permissions.AccessPermission],
+        detail=False,
+        methods=["get"],
+        url_name="me",
+        url_path="me",
     )
-    # pylint: disable=unused-argument
-    def generate_document(self, request, pk=None):
-        """
-        Generate and return a document for this template around the
-        body passed as argument.
+    def get_user_access(self, request, *args, **kwargs):
+        """Retrieve the access related to the current user and return it."""
 
-        2 types of body are accepted:
-        - HTML: body_type = "html"
-        - Markdown: body_type = "markdown"
-
-        2 types of documents can be generated:
-        - PDF: format = "pdf"
-        - Docx: format = "docx"
-        """
-        serializer = serializers.DocumentGenerationSerializer(data=request.data)
-
-        if not serializer.is_valid():
-            return drf.response.Response(
-                serializer.errors, status=drf.status.HTTP_400_BAD_REQUEST
+        document = self.document
+        user = request.user
+        access = (
+            self.get_queryset()
+            .filter(
+                db.Q(user=user) | db.Q(team__in=user.teams),
+                document__path=Left(db.Value(document.path), Length("document__path")),
+                document__ancestors_deleted_at__isnull=True,
             )
+            .order_by("created_at")
+            .first()
+        )
 
-        body = serializer.validated_data["body"]
-        body_type = serializer.validated_data["body_type"]
-        export_format = serializer.validated_data["format"]
+        if not access:
+            raise drf.exceptions.PermissionDenied()
 
-        template = self.get_object()
-        return template.generate_document(body, body_type, export_format)
-
-
-class TemplateAccessViewSet(
-    ResourceAccessViewsetMixin,
-    drf.mixins.CreateModelMixin,
-    drf.mixins.DestroyModelMixin,
-    drf.mixins.ListModelMixin,
-    drf.mixins.RetrieveModelMixin,
-    drf.mixins.UpdateModelMixin,
-    drf.viewsets.GenericViewSet,
-):
-    """
-    API ViewSet for all interactions with template accesses.
-
-    GET /api/v1.0/templates/<template_id>/accesses/:<template_access_id>
-        Return list of all template accesses related to the logged-in user or one
-        template access if an id is provided.
-
-    POST /api/v1.0/templates/<template_id>/accesses/ with expected data:
-        - user: str
-        - role: str [administrator|editor|reader]
-        Return newly created template access
-
-    PUT /api/v1.0/templates/<template_id>/accesses/<template_access_id>/ with expected data:
-        - role: str [owner|admin|editor|reader]
-        Return updated template access
-
-    PATCH /api/v1.0/templates/<template_id>/accesses/<template_access_id>/ with expected data:
-        - role: str [owner|admin|editor|reader]
-        Return partially updated template access
-
-    DELETE /api/v1.0/templates/<template_id>/accesses/<template_access_id>/
-        Delete targeted template access
-    """
-
-    lookup_field = "pk"
-    pagination_class = Pagination
-    permission_classes = [permissions.IsAuthenticated, permissions.AccessPermission]
-    queryset = models.TemplateAccess.objects.select_related("user").all()
-    resource_field_name = "template"
-    serializer_class = serializers.TemplateAccessSerializer
+        serializer = serializers.DocumentAccessLightSerializer(
+            access, context=self.get_serializer_context()
+        )
+        return drf.response.Response(serializer.data)
 
 
 class InvitationViewset(
@@ -1018,7 +2917,7 @@ class InvitationViewset(
     drf.mixins.RetrieveModelMixin,
     drf.mixins.DestroyModelMixin,
     drf.mixins.UpdateModelMixin,
-    drf.viewsets.GenericViewSet,
+    viewsets.GenericViewSet,
 ):
     """API ViewSet for user invitations to document.
 
@@ -1043,8 +2942,9 @@ class InvitationViewset(
     pagination_class = Pagination
     permission_classes = [
         permissions.CanCreateInvitationPermission,
-        permissions.AccessPermission,
+        permissions.ResourceWithAccessPermission,
     ]
+    throttle_scope = "invitation"
     queryset = (
         models.Invitation.objects.all()
         .select_related("document")
@@ -1083,11 +2983,11 @@ class InvitationViewset(
                 queryset.filter(
                     db.Q(
                         document__accesses__user=user,
-                        document__accesses__role__in=models.PRIVILEGED_ROLES,
+                        document__accesses__role__in=choices.PRIVILEGED_ROLES,
                     )
                     | db.Q(
                         document__accesses__team__in=teams,
-                        document__accesses__role__in=models.PRIVILEGED_ROLES,
+                        document__accesses__role__in=choices.PRIVILEGED_ROLES,
                     ),
                 )
                 # Abilities are computed based on logged-in user's role and
@@ -1101,17 +3001,119 @@ class InvitationViewset(
         """Save invitation to a document then send an email to the invited user."""
         invitation = serializer.save()
 
-        language = self.request.headers.get("Content-Language", "en-us")
-
         invitation.document.send_invitation_email(
-            invitation.email, invitation.role, self.request.user, language
+            invitation.email,
+            invitation.role,
+            self.request.user,
+            self.request.user.language or settings.LANGUAGE_CODE,
         )
+
+
+class DocumentAskForAccessViewSet(
+    drf.mixins.ListModelMixin,
+    drf.mixins.RetrieveModelMixin,
+    drf.mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    """API ViewSet for asking for access to a document."""
+
+    lookup_field = "id"
+    pagination_class = Pagination
+    permission_classes = [
+        permissions.IsAuthenticated,
+        permissions.ResourceWithAccessPermission,
+    ]
+    throttle_scope = "document_ask_for_access"
+    queryset = models.DocumentAskForAccess.objects.all().order_by("updated_at")
+    serializer_class = serializers.DocumentAskForAccessSerializer
+    _document = None
+
+    def get_document_or_404(self):
+        """Get the document related to the viewset or raise a 404 error."""
+        if self._document is None:
+            try:
+                self._document = models.Document.objects.get(
+                    pk=self.kwargs["resource_id"],
+                    depth=1,
+                )
+            except models.Document.DoesNotExist as e:
+                raise drf.exceptions.NotFound("Document not found.") from e
+        return self._document
+
+    def get_queryset(self):
+        """Return the queryset according to the action."""
+        document = self.get_document_or_404()
+
+        queryset = super().get_queryset()
+        queryset = queryset.filter(document=document)
+
+        is_owner_or_admin = (
+            document.get_role(self.request.user) in models.PRIVILEGED_ROLES
+        )
+        if not is_owner_or_admin:
+            queryset = queryset.filter(user=self.request.user)
+
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        """Create a document ask for access resource."""
+        document = self.get_document_or_404()
+
+        if document.get_role(request.user) in models.PRIVILEGED_ROLES:
+            return drf.response.Response(
+                {"detail": "You already have privileged access to this document."},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = serializers.DocumentAskForAccessCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        queryset = self.get_queryset()
+
+        if queryset.filter(user=request.user).exists():
+            return drf.response.Response(
+                {"detail": "You already ask to access to this document."},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        ask_for_access = models.DocumentAskForAccess.objects.create(
+            document=document,
+            user=request.user,
+            role=serializer.validated_data["role"],
+        )
+
+        send_ask_for_access_mail.delay(ask_for_access.id)
+
+        return drf.response.Response(status=drf.status.HTTP_201_CREATED)
+
+    @drf.decorators.action(detail=True, methods=["post"])
+    def accept(self, request, *args, **kwargs):
+        """Accept a document ask for access resource."""
+        document_ask_for_access = self.get_object()
+
+        serializer = serializers.RoleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        target_role = serializer.validated_data.get(
+            "role", document_ask_for_access.role
+        )
+        abilities = document_ask_for_access.get_abilities(request.user)
+
+        if target_role not in abilities["set_role_to"]:
+            return drf.response.Response(
+                {"detail": "You cannot accept a role higher than your own."},
+                status=drf.status.HTTP_400_BAD_REQUEST,
+            )
+
+        document_ask_for_access.accept(role=target_role)
+        return drf.response.Response(status=drf.status.HTTP_204_NO_CONTENT)
 
 
 class ConfigView(drf.views.APIView):
     """API ViewSet for sharing some public settings."""
 
     permission_classes = [AllowAny]
+    throttle_scope = "config"
 
     def get(self, request):
         """
@@ -1119,18 +3121,291 @@ class ConfigView(drf.views.APIView):
             Return a dictionary of public settings.
         """
         array_settings = [
+            "AI_BOT",
+            "AI_FEATURE_ENABLED",
+            "AI_FEATURE_BLOCKNOTE_ENABLED",
+            "AI_FEATURE_LEGACY_ENABLED",
+            "API_USERS_SEARCH_QUERY_MIN_LENGTH",
+            "COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED",
+            "COLLABORATION_HTTP_FALLBACK_JSON_ENABLED",
+            "COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL",
+            "COLLABORATION_LOCAL_DOC_RETENTION_DAYS",
+            "COLLABORATION_VERSION_GRANULARITY_MS",
             "COLLABORATION_WS_URL",
-            "CRISP_WEBSITE_ID",
+            "COLLABORATION_WS_INACTIVITY_TIMEOUT",
+            "CONVERSION_FILE_EXTENSIONS_ALLOWED",
+            "CONVERSION_FILE_MAX_SIZE",
+            "CONVERSION_UPLOAD_ENABLED",
+            "DOCUMENT_IMAGE_MAX_SIZE",
+            "DUPLICATE_CHILDREN_FEATURE_ENABLED",
             "ENVIRONMENT",
+            "FRONTEND_CSS_URL",
+            "FRONTEND_HOMEPAGE_FEATURE_ENABLED",
+            "FRONTEND_JS_URL",
+            "FRONTEND_SILENT_LOGIN_ENABLED",
             "FRONTEND_THEME",
             "MEDIA_BASE_URL",
+            "POSTHOG_KEY",
+            "POSTHOG_HOST",
             "LANGUAGES",
             "LANGUAGE_CODE",
+            "REACTIONS_MAX_PER_COMMENT",
             "SENTRY_DSN",
+            "TRASHBIN_CUTOFF_DAYS",
         ]
         dict_settings = {}
         for setting in array_settings:
             if hasattr(settings, setting):
                 dict_settings[setting] = getattr(settings, setting)
 
+        dict_settings["theme_customization"] = self._load_theme_customization()
+        dict_settings["RELEASE_VERSION"] = settings.RELEASE
+
         return drf.response.Response(dict_settings)
+
+    def _load_theme_customization(self):
+        if not settings.THEME_CUSTOMIZATION_FILE_PATH:
+            return {}
+
+        cache_key = (
+            f"theme_customization_{slugify(settings.THEME_CUSTOMIZATION_FILE_PATH)}"
+        )
+        theme_customization = cache.get(cache_key, {})
+        if theme_customization:
+            return theme_customization
+
+        try:
+            with open(
+                settings.THEME_CUSTOMIZATION_FILE_PATH, "r", encoding="utf-8"
+            ) as f:
+                theme_customization = json.load(f)
+        except FileNotFoundError:
+            logger.error(
+                "Configuration file not found: %s",
+                settings.THEME_CUSTOMIZATION_FILE_PATH,
+            )
+        except json.JSONDecodeError:
+            logger.error(
+                "Configuration file is not a valid JSON: %s",
+                settings.THEME_CUSTOMIZATION_FILE_PATH,
+            )
+        else:
+            cache.set(
+                cache_key,
+                theme_customization,
+                settings.THEME_CUSTOMIZATION_CACHE_TIMEOUT,
+            )
+
+        return theme_customization
+
+
+class JWKSView(drf.views.APIView):
+    """API ViewSet exposing the public key validating the tokens we issue."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        """
+        GET /api/v1.0/jwks
+            Return the JSON Web Key Set of the tokens issued by this service.
+        """
+        try:
+            jwks = JWTService().get_jwks()
+        except JWTConfigurationError:
+            logger.exception("Unable to publish the JWKS")
+            raise drf.exceptions.NotFound("No JWKS available.") from None
+
+        return drf.response.Response(jwks)
+
+
+class CommentViewSetMixin:
+    """Comment ViewSet Mixin."""
+
+    _document = None
+
+    def get_document_or_404(self):
+        """Get the document related to the viewset or raise a 404 error."""
+        if self._document is None:
+            try:
+                self._document = models.Document.objects.get(
+                    pk=self.kwargs["resource_id"],
+                )
+            except models.Document.DoesNotExist as e:
+                raise drf.exceptions.NotFound("Document not found.") from e
+        return self._document
+
+
+class ThreadViewSet(
+    ResourceAccessViewsetMixin,
+    CommentViewSetMixin,
+    drf.mixins.CreateModelMixin,
+    drf.mixins.ListModelMixin,
+    drf.mixins.RetrieveModelMixin,
+    drf.mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Thread API: list/create threads and nested comment operations."""
+
+    permission_classes = [permissions.CommentPermission]
+    pagination_class = None
+    serializer_class = serializers.ThreadSerializer
+    queryset = models.Thread.objects.select_related(
+        "creator", "document"
+    ).prefetch_related(
+        db.Prefetch(
+            "comments",
+            queryset=models.Comment.objects.select_related("user").prefetch_related(
+                "reactions__users"
+            ),
+        ),
+    )
+    resource_field_name = "document"
+
+    def perform_create(self, serializer):
+        """Create the first comment of the thread."""
+        body = serializer.validated_data["body"]
+        del serializer.validated_data["body"]
+        thread = serializer.save()
+
+        user = self.request.user if self.request.user.is_authenticated else None
+
+        models.Comment.objects.create(
+            thread=thread,
+            user=user,
+            body=body,
+        )
+
+        posthog_capture(
+            PosthogEventName.THREAD_CREATED,
+            user,
+            {"thread_id": str(thread.id)},
+            document=self.get_document_or_404(),
+        )
+
+    @drf.decorators.action(detail=True, methods=["post"], url_path="resolve")
+    def resolve(self, request, *args, **kwargs):
+        """Resolve a thread."""
+        thread = self.get_object()
+        if not thread.resolved:
+            thread.resolved = True
+            thread.resolved_at = timezone.now()
+            thread.resolved_by = request.user
+            thread.save(update_fields=["resolved", "resolved_at", "resolved_by"])
+        return drf.response.Response(status=status.HTTP_204_NO_CONTENT)
+
+    @drf.decorators.action(detail=True, methods=["post"], url_path="unresolve")
+    def unresolve(self, request, *args, **kwargs):
+        """Unresolve a thread."""
+        thread = self.get_object()
+        if thread.resolved:
+            thread.resolved = False
+            thread.resolved_at = None
+            thread.resolved_by = None
+            thread.save(update_fields=["resolved", "resolved_at", "resolved_by"])
+        return drf.response.Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CommentViewSet(
+    CommentViewSetMixin,
+    viewsets.ModelViewSet,
+):
+    """Comment API: list/create comments and nested reaction operations."""
+
+    permission_classes = [permissions.CommentPermission]
+    pagination_class = Pagination
+    serializer_class = serializers.CommentSerializer
+    queryset = (
+        models.Comment.objects.select_related("user")
+        .prefetch_related("reactions__users")
+        .all()
+    )
+
+    def get_queryset(self):
+        """Override to filter on related resource."""
+        return (
+            super()
+            .get_queryset()
+            .filter(
+                thread=self.kwargs["thread_id"],
+                thread__document=self.kwargs["resource_id"],
+            )
+        )
+
+    def get_serializer_context(self):
+        """Extra context provided to the serializer class."""
+        context = super().get_serializer_context()
+        context["document_id"] = self.kwargs["resource_id"]
+        context["thread_id"] = self.kwargs["thread_id"]
+        return context
+
+    def perform_create(self, serializer):
+        """Attach the request user as the comment author."""
+        user = self.request.user if self.request.user.is_authenticated else None
+        comment = serializer.save(user=user)
+
+        posthog_capture(
+            PosthogEventName.COMMENT_CREATED,
+            user,
+            {"comment_id": str(comment.id), "thread_id": str(comment.thread_id)},
+            document=self.get_document_or_404(),
+        )
+
+    @drf.decorators.action(
+        detail=True,
+        methods=["post", "delete"],
+    )
+    def reactions(self, request, *args, **kwargs):
+        """POST: add reaction; DELETE: remove reaction.
+
+        Emoji is expected in request.data['emoji'] for both operations.
+        """
+        comment = self.get_object()
+        serializer = serializers.ReactionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if request.method == "POST":
+            emoji = serializer.validated_data["emoji"]
+
+            if (
+                not models.Reaction.objects.filter(
+                    comment=comment, emoji=emoji
+                ).exists()
+                and comment.reactions.count() >= settings.REACTIONS_MAX_PER_COMMENT
+            ):
+                return drf.response.Response(
+                    {
+                        "emoji": [
+                            _(
+                                "A comment can have a maximum of %(max)d distinct reactions."
+                            )
+                            % {"max": settings.REACTIONS_MAX_PER_COMMENT}
+                        ]
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            reaction, created = models.Reaction.objects.get_or_create(
+                comment=comment,
+                emoji=emoji,
+            )
+            if not created and reaction.users.filter(id=request.user.id).exists():
+                return drf.response.Response(
+                    {"user_already_reacted": True}, status=status.HTTP_400_BAD_REQUEST
+                )
+            reaction.users.add(request.user)
+            return drf.response.Response(status=status.HTTP_201_CREATED)
+
+        # DELETE
+        try:
+            reaction = models.Reaction.objects.get(
+                comment=comment,
+                emoji=serializer.validated_data["emoji"],
+                users__in=[request.user],
+            )
+        except models.Reaction.DoesNotExist as e:
+            raise drf.exceptions.NotFound("Reaction not found.") from e
+        reaction.users.remove(request.user)
+        if not reaction.users.exists():
+            reaction.delete()
+        return drf.response.Response(status=status.HTTP_204_NO_CONTENT)

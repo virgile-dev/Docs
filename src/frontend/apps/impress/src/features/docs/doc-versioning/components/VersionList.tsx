@@ -1,36 +1,39 @@
-import { Loader } from '@openfun/cunningham-react';
+import { Loader } from '@gouvfr-lasuite/ui-components';
 import { DateTime } from 'luxon';
 import { useTranslation } from 'react-i18next';
 
 import { APIError } from '@/api';
-import { Box, BoxButton, InfiniteScroll, Text, TextErrors } from '@/components';
-import { Doc } from '@/features/docs/doc-management';
-import { useDate } from '@/hook';
+import { Box, Icon, Text, TextErrors } from '@/components';
+import { Doc } from '@/docs/doc-management';
+import { useDate } from '@/hooks';
 
-import { useDocVersionsInfiniteQuery } from '../api/useDocVersions';
-import { Versions } from '../types';
+import { useDocActivity } from '../api/useDocActivity';
+import { DocVersion } from '../types';
 
 import { VersionItem } from './VersionItem';
+
+/**
+ * The timeline's timestamps are unix milliseconds; every date helper here reads
+ * ISO strings.
+ */
+const toISO = (timestamp: number) => new Date(timestamp).toISOString();
 
 interface VersionListStateProps {
   isLoading: boolean;
   error: APIError<unknown> | null;
-  versions?: Versions[];
-  doc: Doc;
-  selectedVersionId?: Versions['version_id'];
-  onSelectVersion?: (versionId: Versions['version_id']) => void;
+  versions?: DocVersion[];
+  selectedVersionId?: DocVersion['id'];
+  onSelectVersion?: (versionId: DocVersion['id']) => void;
 }
 
 const VersionListState = ({
   onSelectVersion,
   selectedVersionId,
-
   isLoading,
   error,
   versions,
-  doc,
 }: VersionListStateProps) => {
-  const { formatDate } = useDate();
+  const { formatDateSpecial } = useDate();
 
   if (isLoading) {
     return (
@@ -41,24 +44,23 @@ const VersionListState = ({
   }
 
   return (
-    <Box $gap="10px" $padding="xs">
-      {versions?.map((version) => (
-        <BoxButton
-          aria-label="version item"
-          className="version-item"
-          key={version.version_id}
-          onClick={() => {
-            onSelectVersion?.(version.version_id);
-          }}
-        >
-          <VersionItem
-            versionId={version.version_id}
-            text={formatDate(version.last_modified, DateTime.DATETIME_MED)}
-            docId={doc.id}
-            isActive={version.version_id === selectedVersionId}
-          />
-        </BoxButton>
-      ))}
+    <Box $gap="xxs" $padding="xs">
+      {versions?.map((version) => {
+        const formattedDate = formatDateSpecial(
+          toISO(version.to),
+          'dd MMMM · HH:mm',
+        );
+        const isSelected = version.id === selectedVersionId;
+        return (
+          <Box as="li" key={version.id} $css="list-style: none;">
+            <VersionItem
+              text={formattedDate}
+              isActive={isSelected}
+              onSelect={() => onSelectVersion?.(version.id)}
+            />
+          </Box>
+        );
+      })}
       {error && (
         <Box
           $justify="center"
@@ -68,9 +70,7 @@ const VersionListState = ({
             causes={error.cause}
             icon={
               error.status === 502 ? (
-                <Text $isMaterialIcon $theme="danger">
-                  wifi_off
-                </Text>
+                <Icon iconName="wifi_off" $theme="danger" />
               ) : undefined
             }
           />
@@ -82,8 +82,8 @@ const VersionListState = ({
 
 interface VersionListProps {
   doc: Doc;
-  onSelectVersion?: (versionId: Versions['version_id']) => void;
-  selectedVersionId?: Versions['version_id'];
+  onSelectVersion?: (versionId: DocVersion['id']) => void;
+  selectedVersionId?: DocVersion['id'];
 }
 
 export const VersionList = ({
@@ -92,39 +92,38 @@ export const VersionList = ({
   selectedVersionId,
 }: VersionListProps) => {
   const { t } = useTranslation();
+  const { formatDate } = useDate();
 
+  /**
+   * The whole list arrives at once — the collaboration server bounds it to the
+   * history this user may see, and a version is at least a minute of editing —
+   * so there is nothing to page through.
+   */
   const {
-    data,
+    data: versions,
     error,
     isLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useDocVersionsInfiniteQuery({
-    docId: doc.id,
-  });
+  } = useDocActivity({ docId: doc.id });
 
-  const versions = data?.pages.reduce((acc, page) => {
-    return acc.concat(page.versions);
-  }, [] as Versions[]);
+  const selectedVersion = versions?.find(
+    (version) => version.id === selectedVersionId,
+  );
+  const selectedVersionDate = selectedVersion
+    ? formatDate(toISO(selectedVersion.to), DateTime.DATETIME_MED)
+    : null;
 
   return (
-    <Box $css="overflow-y: auto; overflow-x: hidden;">
-      <InfiniteScroll
-        hasMore={hasNextPage}
-        isLoading={isFetchingNextPage}
-        next={() => {
-          void fetchNextPage();
-        }}
-        as="ul"
-        $padding="none"
-        $margin={{ top: 'none' }}
-        role="listbox"
-      >
+    <Box
+      $css="overflow-y: auto; overflow-x: hidden;"
+      className="--docs--version-list"
+    >
+      <Box as="ul" $padding="none" $margin={{ top: 'none' }} role="list">
         {versions?.length === 0 && (
           <Box $align="center" $margin="large">
             <Text $size="h6" $weight="bold">
-              {t('No versions')}
+              {t('No versions', {
+                description: 'Message when a document has no past version',
+              })}
             </Text>
           </Box>
         )}
@@ -133,10 +132,17 @@ export const VersionList = ({
           isLoading={isLoading}
           error={error}
           versions={versions}
-          doc={doc}
           selectedVersionId={selectedVersionId}
         />
-      </InfiniteScroll>
+      </Box>
+      <Text className="sr-only" aria-live="polite">
+        {selectedVersionDate
+          ? t('Selected version {{date}}', {
+              description: 'Screen reader text of the selected version',
+              date: selectedVersionDate,
+            })
+          : ''}
+      </Text>
     </Box>
   );
 };

@@ -35,20 +35,26 @@ DB_PORT            = 5432
 
 # -- Docker
 # Get the current user ID to use for docker run and docker exec commands
-DOCKER_UID          = $(shell id -u)
-DOCKER_GID          = $(shell id -g)
-DOCKER_USER         = $(DOCKER_UID):$(DOCKER_GID)
+ifeq ($(OS),Windows_NT)
+DOCKER_USER         := 0:0     # run containers as root on Windows
+else
+DOCKER_UID          := $(shell id -u)
+DOCKER_GID          := $(shell id -g)
+DOCKER_USER         := $(DOCKER_UID):$(DOCKER_GID)
+endif
 COMPOSE             = DOCKER_USER=$(DOCKER_USER) docker compose
+COMPOSE_E2E         = DOCKER_USER=$(DOCKER_USER) docker compose -f compose.yml -f compose-e2e.yml
+COMPOSE_DEMO        = $(COMPOSE)
 COMPOSE_EXEC        = $(COMPOSE) exec
 COMPOSE_EXEC_APP    = $(COMPOSE_EXEC) app-dev
 COMPOSE_RUN         = $(COMPOSE) run --rm
 COMPOSE_RUN_APP     = $(COMPOSE_RUN) app-dev
 COMPOSE_RUN_CROWDIN = $(COMPOSE_RUN) crowdin crowdin
-WAIT_DB             = @$(COMPOSE_RUN) dockerize -wait tcp://$(DB_HOST):$(DB_PORT) -timeout 60s
 
 # -- Backend
 MANAGE              = $(COMPOSE_RUN_APP) python manage.py
-MAIL_YARN           = $(COMPOSE_RUN) -w /app/src/mail node yarn
+MAIL_YARN           = $(COMPOSE_RUN) -w //app/src/mail node yarn
+YHUB_SERVICE       = yhub
 
 # -- Frontend
 PATH_FRONT          = ./src/frontend
@@ -65,34 +71,145 @@ data/media:
 data/static:
 	@mkdir -p data/static
 
+# RSA keys signing the JWT tokens the services issue: one for the backend, one
+# for the collaboration server. Generated locally, never committed: "data/" is
+# gitignored. Regenerate one by deleting the file. Both are listed, so a stack
+# set up before the collaboration server had a key of its own gets it too.
+data/jwt/private.pem:
+	@bin/generate-jwt-private-key.sh
+
+data/jwt/yhub-private.pem:
+	@bin/generate-jwt-private-key.sh
+
 # -- Project
 
-create-env-files: ## Copy the dist env files to env files
-create-env-files: \
-	env.d/development/common \
-	env.d/development/crowdin \
-	env.d/development/postgresql \
-	env.d/development/kc_postgresql
-.PHONY: create-env-files
+create-env-local-files: ## create env.local files in env.d/development
+create-env-local-files:
+	@touch env.d/development/crowdin.local
+	@touch env.d/development/common.local
+	@touch env.d/development/postgresql.local
+	@touch env.d/development/kc_auth.local
+	@touch env.d/development/kc_postgresql.local
+	@touch env.d/development/yhub-postgres.local
+	@touch env.d/development/yhub.local
+.PHONY: create-env-local-files
 
-bootstrap: ## Prepare Docker images for the project
-bootstrap: \
+generate-secret-keys:
+generate-secret-keys: ## generate the secret keys needed by the dev stack
+generate-secret-keys: data/jwt/private.pem data/jwt/yhub-private.pem
+	@bin/generate-oidc-store-refresh-token-key.sh
+.PHONY: generate-secret-keys
+
+pre-bootstrap: \
+	create-docker-network \
 	data/media \
 	data/static \
-	create-env-files \
-	build \
-	run-with-frontend \
+	create-env-local-files \
+	generate-secret-keys
+.PHONY: pre-bootstrap
+
+post-bootstrap: \
 	migrate \
-	demo \
+	migrate-yhub \
 	back-i18n-compile \
 	mails-install \
 	mails-build
+.PHONY: post-bootstrap
+
+pre-beautiful-bootstrap: ## Display a welcome message before bootstrap
+ifeq ($(OS),Windows_NT)
+	@echo ""
+	@echo "================================================================================"
+	@echo ""
+	@echo "  Welcome to Docs - Collaborative Text Editing from La Suite!"
+	@echo ""
+	@echo "  This will set up your development environment with:"
+	@echo "  - Docker containers for all services"
+	@echo "  - Database migrations and static files"
+	@echo "  - Frontend dependencies and build"
+	@echo "  - Environment configuration files"
+	@echo ""
+	@echo "  Services will be available at:"
+	@echo "  - Frontend: http://localhost:3000"
+	@echo "  - API:      http://localhost:8071"
+	@echo "  - Admin:    http://localhost:8071/admin"
+	@echo ""
+	@echo "================================================================================"
+	@echo ""
+	@echo "Starting bootstrap process..."
+else
+	@echo "$(BOLD)"
+	@echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+	@echo "║                                                                              ║"
+	@echo "║  🚀 Welcome to Docs - Collaborative Text Editing from La Suite ! 🚀          ║"
+	@echo "║                                                                              ║"
+	@echo "║  This will set up your development environment with :                        ║"
+	@echo "║  • Docker containers for all services                                        ║"
+	@echo "║  • Database migrations and static files                                      ║"
+	@echo "║  • Frontend dependencies and build                                           ║"
+	@echo "║  • Environment configuration files                                           ║"
+	@echo "║                                                                              ║"
+	@echo "║  Services will be available at:                                              ║"
+	@echo "║  • Frontend: http://localhost:3000                                           ║"
+	@echo "║  • API:      http://localhost:8071                                           ║"
+	@echo "║  • Admin:    http://localhost:8071/admin                                     ║"
+	@echo "║                                                                              ║"
+	@echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+	@echo "$(RESET)"
+	@echo "$(GREEN)Starting bootstrap process...$(RESET)"
+endif
+	@echo ""
+.PHONY: pre-beautiful-bootstrap
+
+post-beautiful-bootstrap: ## Display a success message after bootstrap
+	@echo ""
+ifeq ($(OS),Windows_NT)
+	@echo "Bootstrap completed successfully!"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  - Visit http://localhost:3000 to access the application"
+	@echo "  - Run 'make help' to see all available commands"
+else
+	@echo "$(GREEN)🎉 Bootstrap completed successfully!$(RESET)"
+	@echo ""
+	@echo "$(BOLD)Next steps:$(RESET)"
+	@echo "  • Visit http://localhost:3000 to access the application"
+	@echo "  • Run 'make help' to see all available commands"
+endif
+	@echo ""
+.PHONY: post-beautiful-bootstrap
+
+create-docker-network: ## create the docker network if it doesn't exist
+	@docker network create lasuite-network || true
+.PHONY: create-docker-network
+
+bootstrap: ## Prepare the project for local development
+bootstrap: \
+	pre-beautiful-bootstrap \
+	pre-bootstrap \
+	build \
+	post-bootstrap \
+	run \
+	demo \
+	post-beautiful-bootstrap
 .PHONY: bootstrap
 
+bootstrap-e2e: ## Prepare Docker production images to be used for e2e tests
+bootstrap-e2e: COMPOSE_DEMO = $(COMPOSE_E2E)
+bootstrap-e2e: YHUB_SERVICE = yhub-e2e
+bootstrap-e2e: \
+	pre-bootstrap \
+	build-e2e \
+	post-bootstrap \
+	run-e2e \
+	demo
+.PHONY: bootstrap-e2e
+
 # -- Docker/compose
-build: cache ?= --no-cache
+build: cache ?=
 build: ## build the project containers
 	@$(MAKE) build-backend cache=$(cache)
+	@$(MAKE) build-yhub cache=$(cache)
 	@$(MAKE) build-yjs-provider cache=$(cache)
 	@$(MAKE) build-frontend cache=$(cache)
 .PHONY: build
@@ -102,51 +219,91 @@ build-backend: ## build the app-dev container
 	@$(COMPOSE) build app-dev $(cache)
 .PHONY: build-backend
 
+build-yhub: cache ?=
+build-yhub: ## build the yhub collaboration server container
+	@$(COMPOSE) build yhub $(cache)
+.PHONY: build-yhub
+
 build-yjs-provider: cache ?=
 build-yjs-provider: ## build the y-provider container
-	@$(COMPOSE) build y-provider $(cache)
+	@$(COMPOSE) build y-provider-development-converter $(cache)
 .PHONY: build-yjs-provider
 
 build-frontend: cache ?=
 build-frontend: ## build the frontend container
-	@$(COMPOSE) build frontend-dev $(cache)
+	@$(COMPOSE) build frontend-development $(cache)
 .PHONY: build-frontend
 
+build-e2e: cache ?=
+build-e2e: ## build the e2e container
+	@$(MAKE) build-backend cache=$(cache)
+	@$(COMPOSE_E2E) build yhub-e2e $(cache)
+	@$(COMPOSE_E2E) build frontend $(cache)
+	@$(COMPOSE_E2E) build y-provider-converter $(cache)
+.PHONY: build-e2e
+
+nginx-frontend: ## build the nginx-frontend container
+	@$(COMPOSE) up --force-recreate -d nginx-frontend
+.PHONY: nginx-frontend
+
 down: ## stop and remove containers, networks, images, and volumes
-	@$(COMPOSE) down
+	@$(COMPOSE_E2E) down
 .PHONY: down
 
 logs: ## display app-dev logs (follow mode)
 	@$(COMPOSE) logs -f app-dev
 .PHONY: logs
 
-run: ## start the wsgi (production) and development server
+run-backend: ## Start only the backend application and all needed services
+	@$(MAKE) create-docker-network
+	@$(MAKE) data/jwt/private.pem
+	@$(MAKE) data/jwt/yhub-private.pem
+	@$(COMPOSE) up --force-recreate -d docspec
 	@$(COMPOSE) up --force-recreate -d celery-dev
-	@$(COMPOSE) up --force-recreate -d y-provider
+	@$(COMPOSE) up --force-recreate -d y-provider-development-converter
+	@$(COMPOSE) up --force-recreate -d yhub
 	@$(COMPOSE) up --force-recreate -d nginx
-	@echo "Wait for postgresql to be up..."
-	@$(WAIT_DB)
+.PHONY: run-backend
+
+run: ## start the wsgi (production) and development server
+run:
+	@$(MAKE) run-backend
+	@$(COMPOSE) up --force-recreate -d frontend-development
 .PHONY: run
 
-run-with-frontend: ## Start all the containers needed (backend to frontend)
-	@$(MAKE) run
-	@$(COMPOSE) up --force-recreate -d frontend-dev
-.PHONY: run-with-frontend
+run-e2e: ## start the e2e server
+run-e2e:
+	@$(MAKE) create-docker-network
+	@$(MAKE) data/jwt/private.pem
+	@$(MAKE) data/jwt/yhub-private.pem
+	@$(COMPOSE) up --force-recreate -d docspec
+	@$(COMPOSE) up --force-recreate -d celery-dev
+	@$(COMPOSE_E2E) up --force-recreate -d y-provider-converter
+	@$(COMPOSE_E2E) up --force-recreate -d yhub-e2e
+	@$(COMPOSE) up --force-recreate -d nginx
+	@$(COMPOSE_E2E) up --force-recreate -d frontend
+.PHONY: run-e2e
 
 status: ## an alias for "docker compose ps"
-	@$(COMPOSE) ps
+	@$(COMPOSE_E2E) ps
 .PHONY: status
 
 stop: ## stop the development server using Docker
-	@$(COMPOSE) stop
+	@$(COMPOSE_E2E) stop
 .PHONY: stop
 
 # -- Backend
 
 demo: ## flush db then create a demo for load testing purpose
+	@echo "$(BOLD)Waiting for the backend and the collaboration server (yhub)$(RESET)"
+	@$(COMPOSE_DEMO) up -d --wait app-dev $(YHUB_SERVICE)
 	@$(MAKE) resetdb
 	@$(MANAGE) create_demo
 .PHONY: demo
+
+index: ## index all documents to remote search
+	@$(MANAGE) index
+.PHONY: index
 
 # Nota bene: Black should come after isort just in case they don't agree...
 lint: ## lint back-end python sources
@@ -188,16 +345,28 @@ test-back-parallel: ## run all back-end tests in parallel
 makemigrations:  ## run django makemigrations for the impress project.
 	@echo "$(BOLD)Running makemigrations$(RESET)"
 	@$(COMPOSE) up -d postgresql
-	@$(WAIT_DB)
 	@$(MANAGE) makemigrations
 .PHONY: makemigrations
 
 migrate:  ## run django migrations for the impress project.
 	@echo "$(BOLD)Running migrations$(RESET)"
 	@$(COMPOSE) up -d postgresql
-	@$(WAIT_DB)
 	@$(MANAGE) migrate
 .PHONY: migrate
+
+# Runs the DDL script yhub ships (`bin/init-db.js`, wrapped as `yarn
+# init-db`): it creates the yhub database when missing, then every table the
+# installed @y/hub version needs. yhub never runs DDL from the server or the
+# worker, so this is what applies a schema change after an upgrade.
+# Both stores are started because the script also creates the valkey worker
+# stream and connects to it whenever REDIS is set. Re-running is safe and
+# expected; on an existing stream it logs a harmless `BUSYGROUP` error and
+# still exits 0, since the server creates that stream at startup anyway.
+migrate-yhub:  ## create or upgrade the collaboration server (yhub) schema.
+	@echo "$(BOLD)Running yhub migrations$(RESET)"
+	@$(COMPOSE) up -d yhub-postgres yhub-valkey
+	@$(COMPOSE_RUN) --no-deps yhub yarn init-db
+.PHONY: migrate-yhub
 
 superuser: ## Create an admin superuser with password "admin"
 	@echo "$(BOLD)Creating a Django superuser$(RESET)"
@@ -205,7 +374,7 @@ superuser: ## Create an admin superuser with password "admin"
 .PHONY: superuser
 
 back-i18n-compile: ## compile the gettext files
-	@$(MANAGE) compilemessages --ignore="venv/**/*"
+	@$(MANAGE) compilemessages --ignore=".venv/**/*"
 .PHONY: back-i18n-compile
 
 back-i18n-generate: ## create the .pot files used for i18n
@@ -228,20 +397,6 @@ resetdb: ## flush database and create a superuser "admin"
 	@$(MANAGE) flush $(FLUSH_ARGS)
 	@${MAKE} superuser
 .PHONY: resetdb
-
-env.d/development/common:
-	cp -n env.d/development/common.dist env.d/development/common
-
-env.d/development/postgresql:
-	cp -n env.d/development/postgresql.dist env.d/development/postgresql
-
-env.d/development/kc_postgresql:
-	cp -n env.d/development/kc_postgresql.dist env.d/development/kc_postgresql
-
-# -- Internationalization
-
-env.d/development/crowdin:
-	cp -n env.d/development/crowdin.dist env.d/development/crowdin
 
 crowdin-download: ## Download translated message from crowdin
 	@$(COMPOSE_RUN_CROWDIN) download -c crowdin/config.yml
@@ -310,18 +465,22 @@ help:
 .PHONY: help
 
 # Front
-frontend-install: ## install the frontend locally
+frontend-development-install: ## install the frontend locally
 	cd $(PATH_FRONT_IMPRESS) && yarn
-.PHONY: frontend-install
+.PHONY: frontend-development-install
 
 frontend-lint: ## run the frontend linter
 	cd $(PATH_FRONT) && yarn lint
 .PHONY: frontend-lint
 
 run-frontend-development: ## Run the frontend in development mode
-	@$(COMPOSE) stop frontend-dev
+	@$(COMPOSE) stop frontend-development
 	cd $(PATH_FRONT_IMPRESS) && yarn dev
 .PHONY: run-frontend-development
+
+frontend-test: ## Run the frontend tests
+	cd $(PATH_FRONT_IMPRESS) && yarn test
+.PHONY: frontend-test
 
 frontend-i18n-extract: ## Extract the frontend translation inside a json to be used for crowdin
 	cd $(PATH_FRONT) && yarn i18n:extract
@@ -353,6 +512,6 @@ bump-packages-version: ## bump the version of the project - VERSION_TYPE can be 
 	cd ./src/frontend/apps/e2e/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
 	cd ./src/frontend/apps/impress/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
 	cd ./src/frontend/servers/y-provider/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
-	cd ./src/frontend/packages/eslint-config-impress/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
+	cd ./src/frontend/packages/eslint-plugin-docs/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
 	cd ./src/frontend/packages/i18n/ && yarn version --no-git-tag-version --$(VERSION_TYPE)
 .PHONY: bump-packages-version

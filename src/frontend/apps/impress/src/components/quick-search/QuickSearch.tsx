@@ -1,5 +1,5 @@
 import { Command } from 'cmdk';
-import { ReactNode, useRef } from 'react';
+import { PropsWithChildren, ReactNode, useId, useRef } from 'react';
 
 import { hasChildrens } from '@/utils/children';
 
@@ -14,7 +14,8 @@ export type QuickSearchAction = {
 };
 
 export type QuickSearchData<T> = {
-  groupName: string;
+  groupName?: string;
+  groupKey?: string;
   elements: T[];
   emptyString?: string;
   startActions?: QuickSearchAction[];
@@ -23,6 +24,7 @@ export type QuickSearchData<T> = {
 };
 
 export type QuickSearchProps = {
+  isSelectByDefault?: boolean;
   onFilter?: (str: string) => void;
   inputValue?: string;
   inputContent?: ReactNode;
@@ -30,38 +32,50 @@ export type QuickSearchProps = {
   loading?: boolean;
   label?: string;
   placeholder?: string;
-  children?: ReactNode;
+  groupKey?: string;
+  beforeList?: ReactNode;
 };
 
 export const QuickSearch = ({
+  isSelectByDefault,
   onFilter,
   inputContent,
   inputValue,
-  loading,
   showInput = true,
   label,
+  loading,
   placeholder,
+  beforeList,
   children,
-}: QuickSearchProps) => {
+}: PropsWithChildren<QuickSearchProps>) => {
   const ref = useRef<HTMLDivElement | null>(null);
+  const listId = useId();
 
   return (
     <>
       <QuickSearchStyle />
       <div className="quick-search-container">
-        <Command label={label} shouldFilter={false} ref={ref}>
+        <Command
+          label={label}
+          shouldFilter={false}
+          ref={ref}
+          tabIndex={-1}
+          disablePointerSelection
+          value={!isSelectByDefault ? '__none__' : undefined}
+        >
           {showInput && (
             <QuickSearchInput
-              loading={loading}
               withSeparator={hasChildrens(children)}
               inputValue={inputValue}
               onFilter={onFilter}
               placeholder={placeholder}
+              listId={listId}
             >
               {inputContent}
             </QuickSearchInput>
           )}
-          <Command.List>
+          {beforeList}
+          <Command.List id={listId} aria-busy={loading}>
             <Box>{children}</Box>
           </Command.List>
         </Command>

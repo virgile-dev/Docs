@@ -1,26 +1,31 @@
 import fetchMock from 'fetch-mock';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { fetchAPI } from '@/api';
 
 describe('fetchAPI', () => {
   beforeEach(() => {
-    fetchMock.restore();
+    fetchMock.hardReset();
+    fetchMock.mockGlobal();
   });
 
   it('adds correctly the basename', () => {
-    fetchMock.mock('http://test.jest/api/v1.0/some/url', 200);
+    fetchMock.route('http://test.jest/api/v1.0/some/url', 200);
 
     void fetchAPI('some/url');
 
-    expect(fetchMock.lastUrl()).toEqual('http://test.jest/api/v1.0/some/url');
+    expect(fetchMock.callHistory.lastCall()?.url).toEqual(
+      'http://test.jest/api/v1.0/some/url',
+    );
   });
 
   it('adds the credentials automatically', () => {
-    fetchMock.mock('http://test.jest/api/v1.0/some/url', 200);
+    fetchMock.route('http://test.jest/api/v1.0/some/url', 200);
 
-    void fetchAPI('some/url', { body: 'some body' });
+    void fetchAPI('some/url', { method: 'POST', body: 'some body' });
 
-    expect(fetchMock.lastOptions()).toEqual({
+    expect(fetchMock.callHistory.lastCall()?.args[1]).toEqual({
+      method: 'POST',
       body: 'some body',
       credentials: 'include',
       headers: {
@@ -29,11 +34,22 @@ describe('fetchAPI', () => {
     });
   });
 
-  it('check the versionning', () => {
-    fetchMock.mock('http://test.jest/api/v2.0/some/url', 200);
+  it('check the versioning', () => {
+    fetchMock.route('http://test.jest/api/v2.0/some/url', 200);
 
     void fetchAPI('some/url', {}, '2.0');
 
-    expect(fetchMock.lastUrl()).toEqual('http://test.jest/api/v2.0/some/url');
+    expect(fetchMock.callHistory.lastCall()?.url).toEqual(
+      'http://test.jest/api/v2.0/some/url',
+    );
+  });
+
+  it('removes Content-Type header when withoutContentType is true', async () => {
+    fetchMock.route('http://test.jest/api/v1.0/some/url', 200);
+
+    await fetchAPI('some/url', { withoutContentType: true });
+
+    const options = fetchMock.callHistory.lastCall()?.options;
+    expect(options?.headers).not.toHaveProperty('Content-Type');
   });
 });

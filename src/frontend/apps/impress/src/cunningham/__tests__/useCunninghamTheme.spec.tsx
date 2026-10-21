@@ -1,12 +1,16 @@
 import { useCunninghamTheme } from '../useCunninghamTheme';
 
 describe('<useCunninghamTheme />', () => {
-  it('has the dsfr logo correctly set', () => {
-    const { themeTokens, setTheme } = useCunninghamTheme.getState();
-    setTheme('dsfr');
-    const logo = themeTokens().logo;
-    expect(logo?.src).toBe('/assets/logo-gouv.svg');
-    expect(logo?.widthHeader).toBe('110px');
-    expect(logo?.widthFooter).toBe('220px');
+  it('changing theme update tokens', () => {
+    expect(
+      useCunninghamTheme.getState().currentTokens.globals?.font.families.base,
+    ).toBe('Inter Variable, Roboto Flex Variable, sans-serif');
+
+    // Change theme
+    useCunninghamTheme.getState().setTheme('dsfr');
+
+    expect(
+      useCunninghamTheme.getState().currentTokens.globals?.font.families.base,
+    ).toBe('Marianne, Inter Variable, Roboto Flex Variable, sans-serif');
   });
 });

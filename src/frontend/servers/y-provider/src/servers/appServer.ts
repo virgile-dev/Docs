@@ -1,51 +1,34 @@
-// eslint-disable-next-line import/order
-import '../services/sentry';
 import * as Sentry from '@sentry/node';
 import express from 'express';
-import expressWebsockets from 'express-ws';
 
-import { PORT } from '../env';
-import {
-  collaborationResetConnectionsHandler,
-  collaborationWSHandler,
-  convertMarkdownHandler,
-} from '../handlers';
-import { corsMiddleware, httpSecurity, wsSecurity } from '../middlewares';
-import { routes } from '../routes';
-import { logger } from '../utils';
+import { CONVERSION_FILE_MAX_SIZE } from '@/env';
+import { convertHandler } from '@/handlers';
+import { corsMiddleware, httpSecurity } from '@/middlewares';
+import { routes } from '@/routes';
+import { logger } from '@/utils';
 
 /**
- * init the collaboration server.
+ * init the conversion server.
  *
- * @param port - The port on which the server listens.
- * @param serverSecret - The secret key for API authentication.
- * @returns An object containing the Express app, Hocuspocus server, and HTTP server instance.
+ * @returns The Express app instance.
  */
-export const initServer = () => {
-  const { app } = expressWebsockets(express());
-  app.use(express.json());
+export const initApp = () => {
+  const app = express();
+
   app.use(corsMiddleware);
 
   /**
-   * Route to handle WebSocket connections
-   */
-  app.ws(routes.COLLABORATION_WS, wsSecurity, collaborationWSHandler);
-
-  /**
-   * Route to reset connections in a room:
-   *  - If no user ID is provided, close all connections in the room
-   *  - If a user ID is provided, close connections for the user in the room
+   * Route to convert Markdown or BlockNote blocks and Yjs content
    */
   app.post(
-    routes.COLLABORATION_RESET_CONNECTIONS,
+    routes.CONVERT,
     httpSecurity,
-    collaborationResetConnectionsHandler,
+    express.raw({
+      limit: CONVERSION_FILE_MAX_SIZE,
+      type: '*/*',
+    }),
+    convertHandler,
   );
-
-  /**
-   * Route to convert markdown
-   */
-  app.post(routes.CONVERT_MARKDOWN, httpSecurity, convertMarkdownHandler);
 
   Sentry.setupExpressErrorHandler(app);
 
@@ -58,9 +41,5 @@ export const initServer = () => {
     res.status(403).json({ error: 'Forbidden' });
   });
 
-  const server = app.listen(PORT, () =>
-    console.log('App listening on port :', PORT),
-  );
-
-  return { app, server };
+  return app;
 };

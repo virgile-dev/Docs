@@ -1,13 +1,15 @@
-import { HocuspocusProvider } from '@hocuspocus/provider';
+import { WebsocketProvider } from 'y-websocket';
 import * as Y from 'yjs';
 import { create } from 'zustand';
 
 interface BroadcastState {
   addTask: (taskLabel: string, action: () => void) => void;
   broadcast: (taskLabel: string) => void;
-  getBroadcastProvider: () => HocuspocusProvider | undefined;
-  provider?: HocuspocusProvider;
-  setBroadcastProvider: (provider: HocuspocusProvider) => void;
+  cleanupBroadcast: () => void;
+  getBroadcastProvider: () => WebsocketProvider | undefined;
+  handleProviderSync: (isSynced: boolean) => void;
+  provider?: WebsocketProvider;
+  setBroadcastProvider: (provider: WebsocketProvider) => void;
   setTask: (
     taskLabel: string,
     task: Y.Array<string>,
@@ -15,11 +17,12 @@ interface BroadcastState {
   ) => void;
   tasks: {
     [taskLabel: string]: {
-      task: Y.Array<string>;
+      action: () => void;
       observer: (
         event: Y.YArrayEvent<string>,
         transaction: Y.Transaction,
       ) => void;
+      task: Y.Array<string>;
     };
   };
 }
@@ -27,7 +30,27 @@ interface BroadcastState {
 export const useBroadcastStore = create<BroadcastState>((set, get) => ({
   provider: undefined,
   tasks: {},
-  setBroadcastProvider: (provider) => set({ provider }),
+  setBroadcastProvider: (provider) => {
+    // Clean up old provider listeners
+    const oldProvider = get().provider;
+    if (oldProvider) {
+      oldProvider.off('sync', get().handleProviderSync);
+    }
+
+    provider.on('sync', get().handleProviderSync);
+    set({ provider });
+  },
+  handleProviderSync: (isSynced) => {
+    // 'sync' fires on both edges; only re-register the tasks once synced
+    if (!isSynced) {
+      return;
+    }
+
+    const tasks = get().tasks;
+    Object.entries(tasks).forEach(([taskLabel, { action }]) => {
+      get().addTask(taskLabel, action);
+    });
+  },
   getBroadcastProvider: () => {
     const provider = get().provider;
     if (!provider) {
@@ -43,20 +66,22 @@ export const useBroadcastStore = create<BroadcastState>((set, get) => ({
       return;
     }
 
-    const existingTask = get().tasks[taskLabel];
-    if (existingTask) {
-      existingTask.task.unobserve(existingTask.observer);
-      get().setTask(taskLabel, existingTask.task, action);
-      return;
-    }
-
-    const task = provider.document.getArray<string>(taskLabel);
+    const task = provider.doc.getArray<string>(taskLabel);
     get().setTask(taskLabel, task, action);
   },
   setTask: (taskLabel: string, task: Y.Array<string>, action: () => void) => {
+    // Unobserve the previous observer to avoid leaking one per re-registration
+    const previousTask = get().tasks[taskLabel];
+    if (previousTask) {
+      previousTask.task.unobserve(previousTask.observer);
+    }
+
     let isInitializing = true;
-    const observer = () => {
-      if (!isInitializing) {
+    const observer = (
+      _event: Y.YArrayEvent<string>,
+      transaction: Y.Transaction,
+    ) => {
+      if (!isInitializing && !transaction.local) {
         action();
       }
     };
@@ -73,16 +98,29 @@ export const useBroadcastStore = create<BroadcastState>((set, get) => ({
         [taskLabel]: {
           task,
           observer,
+          action,
         },
       },
     }));
   },
   broadcast: (taskLabel) => {
-    const { task } = get().tasks[taskLabel];
-    if (!task) {
-      console.warn(`Task ${taskLabel} is not defined`);
-      return;
+    // Broadcast via Y.js provider (for users on the same document)
+    const obTask = get().tasks?.[taskLabel];
+    if (obTask?.task) {
+      obTask.task.push([`broadcast: ${taskLabel}`]);
     }
-    task.push([`broadcast: ${taskLabel}`]);
+  },
+  cleanupBroadcast: () => {
+    const provider = get().provider;
+    if (provider) {
+      provider.off('sync', get().handleProviderSync);
+    }
+
+    // Unobserve all document-specific tasks
+    Object.values(get().tasks).forEach(({ task, observer }) => {
+      task.unobserve(observer);
+    });
+
+    set({ tasks: {}, provider: undefined });
   },
 }));

@@ -1,42 +1,74 @@
-import { Button } from '@openfun/cunningham-react';
+import { Button } from '@gouvfr-lasuite/ui-components';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { InView } from 'react-intersection-observer';
 import { css } from 'styled-components';
 
-import { Box, Card, Text } from '@/components';
-import {
-  DocDefaultFilter,
-  useInfiniteDocs,
-} from '@/features/docs/doc-management';
+import { Box, Card, Loading, Text } from '@/components';
+import { FadeComponent } from '@/components/Effect';
+import { useImport } from '@/docs/doc-management/hooks/useImport';
+import { DocDefaultFilter, DocsOrdering } from '@/docs/doc-management/types';
+import DocsIcon from '@/icons/Docs.svg';
+import BinIcon from '@/icons/bin.svg';
+import ClockIcon from '@/icons/clock.svg';
+import SharedIcon from '@/icons/shared.svg';
+import StarIcon from '@/icons/star.svg';
+import TrashIcon from '@/icons/trash.svg';
+import UserIcon from '@/icons/user.svg';
 import { useResponsiveStore } from '@/stores';
 
-import { DocsGridItem } from './DocsGridItem';
-import { DocsGridLoader } from './DocsGridLoader';
+import { useDocsGridQuery } from '../api/useDocsGridQuery';
+
+import { DocGridContentList } from './DocGridContentList';
+import { DocsGridColumnName } from './DocsGridColumnName';
 
 type DocsGridProps = {
   target?: DocDefaultFilter;
 };
+
 export const DocsGrid = ({
   target = DocDefaultFilter.ALL_DOCS,
 }: DocsGridProps) => {
   const { t } = useTranslation();
-
-  const { isDesktop } = useResponsiveStore();
-
+  const [isDragOver, setIsDragOver] = useState(false);
   const {
-    data,
-    isFetching,
-    isRefetching,
-    isLoading,
-    fetchNextPage,
-    hasNextPage,
-  } = useInfiniteDocs({
-    page: 1,
-    ...(target &&
-      target !== DocDefaultFilter.ALL_DOCS && {
-        is_creator_me: target === DocDefaultFilter.MY_DOCS,
-      }),
+    getRootProps,
+    isPending: isImportPending,
+    isEnabled: isImportEnabled,
+  } = useImport({
+    onDragOver: (dragOver: boolean) => {
+      setIsDragOver(dragOver);
+    },
   });
+
+  const withUpload =
+    (!target ||
+      target === DocDefaultFilter.ALL_DOCS ||
+      target === DocDefaultFilter.MY_DOCS) &&
+    isImportEnabled;
+
+  const { isDesktop, isSmallMobile } = useResponsiveStore();
+
+  const [ordering, setOrdering] = useState<DocsOrdering>('-updated_at');
+  const canSort = target !== DocDefaultFilter.TRASHBIN;
+
+  const { data, isFetching, isLoading, fetchNextPage, hasNextPage } =
+    useDocsGridQuery(target, canSort ? ordering : undefined);
+
+  const docs = useMemo(() => {
+    const allDocs = data?.pages.flatMap((page) => page.results) ?? [];
+    // Deduplicate documents by ID to prevent the same doc appearing multiple times
+    // This can happen when a multiple users are impacting the docs list (creation, update, ...)
+    const seenIds = new Set<string>();
+    return allDocs.filter((doc) => {
+      if (seenIds.has(doc.id)) {
+        return false;
+      }
+      seenIds.add(doc.id);
+      return true;
+    });
+  }, [data?.pages]);
+
   const loading = isFetching || isLoading;
   const hasDocs = data?.pages.some((page) => page.results.length > 0);
   const loadMore = (inView: boolean) => {
@@ -46,103 +78,208 @@ export const DocsGrid = ({
     void fetchNextPage();
   };
 
-  const title =
-    target === DocDefaultFilter.MY_DOCS
-      ? t('My docs')
-      : target === DocDefaultFilter.SHARED_WITH_ME
-        ? t('Shared with me')
-        : t('All docs');
+  return (
+    <Box
+      className="--docs--doc-grid"
+      $position="relative"
+      $padding={{
+        horizontal: isSmallMobile ? '0' : 'sm',
+        vertical: isSmallMobile ? '0' : 'sm',
+      }}
+      $width="100%"
+      $maxWidth="960px"
+      $minHeight="0"
+      $align="center"
+    >
+      <Card
+        data-testid="docs-grid"
+        $width="100%"
+        $border="none"
+        $background="transparent"
+        $css={css`
+          ${
+            isDragOver
+              ? `
+              border: 2px dashed var(--c--contextuals--border--semantic--brand--primary);
+              background-color: var(--c--contextuals--background--semantic--brand--tertiary);
+            `
+              : ''
+          }
+        `}
+        $padding={{
+          bottom: 'md',
+        }}
+        {...(withUpload
+          ? getRootProps({ className: 'dropzone', tabIndex: -1 })
+          : {})}
+      >
+        <DocGridTitleBar target={target} isImportPending={isImportPending} />
+        {!hasDocs && !loading && <DocGridNoDocs target={target} />}
+        <Box
+          $gap="6px"
+          $padding={{ vertical: 'sm', horizontal: isDesktop ? 'md' : 'xs' }}
+        >
+          <FadeComponent isVisible={!!hasDocs}>
+            <Box
+              aria-label={t('Documents grid', {
+                description: 'Accessible name of the list of documents',
+              })}
+              $display="grid"
+              $css={css`
+                grid-template-columns: ${
+                  isSmallMobile
+                    ? 'minmax(0, 550px) auto'
+                    : 'minmax(0, 550px) auto auto'
+                };
+                column-gap: 20px;
+              `}
+            >
+              <DocsGridColumnName
+                target={target}
+                ordering={ordering}
+                setOrdering={setOrdering}
+              />
+              <Box role="list" $display="contents">
+                <DocGridContentList docs={docs} />
+              </Box>
+            </Box>
+          </FadeComponent>
+          {loading && (
+            <Loading loaderProps={{ size: 'small' }} $margin={{ top: 'sm' }} />
+          )}
+          {hasNextPage && !loading && (
+            <InView
+              data-testid="infinite-scroll-trigger"
+              as="div"
+              onChange={loadMore}
+              style={{ margin: 'auto' }}
+            >
+              <Button
+                onClick={() => void fetchNextPage()}
+                color="brand"
+                variant="tertiary"
+                className="sr-only"
+              >
+                {t('More docs', {
+                  description: 'Button loading more documents',
+                })}
+              </Button>
+            </InView>
+          )}
+        </Box>
+      </Card>
+    </Box>
+  );
+};
+
+const DocGridTitleBar = ({
+  target,
+  isImportPending,
+}: {
+  target: DocDefaultFilter;
+  isImportPending: boolean;
+}) => {
+  const { t } = useTranslation();
+  const { isDesktop } = useResponsiveStore();
+
+  let title = t('Recent', {
+    description: 'Name of the filter listing recently opened docs',
+  });
+  let icon = <ClockIcon width={24} height={24} aria-hidden="true" />;
+  if (target === DocDefaultFilter.MY_DOCS) {
+    icon = <UserIcon width={24} height={24} aria-hidden="true" />;
+    title = t('My docs', {
+      description: 'Name of the filter listing docs owned by the user',
+    });
+  } else if (target === DocDefaultFilter.SHARED_WITH_ME) {
+    icon = <SharedIcon width={24} height={24} aria-hidden="true" />;
+    title = t('Shared with me', {
+      description: 'Name of the filter listing docs shared with the user',
+    });
+  } else if (target === DocDefaultFilter.STARRED) {
+    icon = <StarIcon width={24} height={24} aria-hidden="true" />;
+    title = t('Starred', {
+      description: "Name of the filter listing the user's favorite docs",
+    });
+  } else if (target === DocDefaultFilter.TRASHBIN) {
+    icon = <TrashIcon width={24} height={24} aria-hidden="true" />;
+    title = t('Trashbin', {
+      description: 'Name of the filter listing deleted docs',
+    });
+  }
 
   return (
     <Box
-      $position="relative"
-      $width="100%"
-      $maxWidth="960px"
-      $maxHeight="calc(100vh - 52px - 1rem)"
+      $direction="row"
+      $padding={{
+        vertical: 'sm',
+        horizontal: isDesktop ? 'md' : 'xs',
+      }}
       $align="center"
-      $css={css`
-        overflow-x: hidden;
-        overflow-y: auto;
-      `}
+      $justify="space-between"
     >
-      <DocsGridLoader isLoading={isRefetching || loading} />
-      <Card
-        data-testid="docs-grid"
-        $height="100%"
-        $width="100%"
-        $css={css`
-          overflow-x: hidden;
-          overflow-y: auto;
-        `}
-        $padding={{
-          top: 'base',
-          horizontal: isDesktop ? 'md' : 'xs',
-          bottom: 'md',
-        }}
-      >
-        <Text
-          as="h4"
-          $size="h4"
-          $variation="1000"
-          $margin={{ top: '0px', bottom: '10px' }}
-        >
+      <Box $direction="row" $gap="xs" $align="center">
+        {icon}
+        <Text as="h2" $size="h4" $margin="none" tabIndex={-1}>
           {title}
         </Text>
+        {isImportPending && <Loading loaderProps={{ size: 'small' }} />}
+      </Box>
+    </Box>
+  );
+};
 
-        {!hasDocs && !loading && (
-          <Box $padding={{ vertical: 'sm' }} $align="center" $justify="center">
-            <Text $size="sm" $variation="600" $weight="700">
-              {t('No documents found')}
-            </Text>
-          </Box>
-        )}
-        {hasDocs && (
-          <Box $gap="6px">
-            <Box
-              $direction="row"
-              $padding={{ horizontal: 'xs' }}
-              $gap="20px"
-              data-testid="docs-grid-header"
-            >
-              <Box $flex={6} $padding="3xs">
-                <Text $size="xs" $variation="600" $weight="500">
-                  {t('Name')}
-                </Text>
-              </Box>
-              {isDesktop && (
-                <Box $flex={2} $padding="3xs">
-                  <Text $size="xs" $weight="500" $variation="600">
-                    {t('Updated at')}
-                  </Text>
-                </Box>
-              )}
+const DocGridNoDocs = ({ target }: { target: DocDefaultFilter }) => {
+  const { t } = useTranslation();
 
-              <Box $flex={1.15} $align="flex-end" $padding="3xs" />
-            </Box>
-
-            {/* Body */}
-            {data?.pages.map((currentPage) => {
-              return currentPage.results.map((doc) => (
-                <DocsGridItem doc={doc} key={doc.id} />
-              ));
+  return (
+    <Box as="p" $padding={{ vertical: 'sm' }} $align="center" $justify="center">
+      {[
+        DocDefaultFilter.ALL_DOCS,
+        DocDefaultFilter.MY_DOCS,
+        DocDefaultFilter.SHARED_WITH_ME,
+        DocDefaultFilter.STARRED,
+      ].includes(target) && (
+        <>
+          <DocsIcon width={56} height={56} aria-hidden="true" />
+          <Text $size="sm" $weight="700">
+            {t('No doc yet', {
+              description: 'Empty state heading when the user has no doc',
             })}
-          </Box>
-        )}
-
-        {hasNextPage && !loading && (
-          <InView
-            data-testid="infinite-scroll-trigger"
-            as="div"
-            onChange={loadMore}
-          >
-            {!isFetching && hasNextPage && (
-              <Button onClick={() => void fetchNextPage()} color="primary-text">
-                {t('More docs')}
-              </Button>
-            )}
-          </InView>
-        )}
-      </Card>
+          </Text>
+          {[DocDefaultFilter.ALL_DOCS, DocDefaultFilter.MY_DOCS].includes(
+            target,
+          ) && (
+            <Text $size="sm" $weight="400" $variation="secondary">
+              {t('Your docs will appear here.', {
+                description: 'Empty state text of the docs list',
+              })}
+            </Text>
+          )}
+          {target === DocDefaultFilter.SHARED_WITH_ME && (
+            <Text $size="sm" $weight="400" $variation="secondary">
+              {t('Your shared docs will appear here.', {
+                description: 'Empty state text of the shared docs list',
+              })}
+            </Text>
+          )}
+        </>
+      )}
+      {target === DocDefaultFilter.TRASHBIN && (
+        <>
+          <BinIcon width={56} height={56} aria-hidden="true" />
+          <Text $size="sm" $weight="700">
+            {t('No doc deleted', {
+              description: 'Empty state heading of the trashbin',
+            })}
+          </Text>
+          <Text $size="sm" $weight="400" $variation="secondary">
+            {t('Deleted docs will appear here.', {
+              description: 'Empty state text of the trashbin',
+            })}
+          </Text>
+        </>
+      )}
     </Box>
   );
 };

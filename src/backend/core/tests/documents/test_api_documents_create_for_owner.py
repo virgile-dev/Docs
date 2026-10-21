@@ -4,9 +4,12 @@ Tests for Documents API endpoint in impress's core app: create
 
 # pylint: disable=W0621
 
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 from unittest.mock import patch
 
 from django.core import mail
+from django.db import connection
 from django.test import override_settings
 
 import pytest
@@ -15,18 +18,34 @@ from rest_framework.test import APIClient
 from core import factories
 from core.api.serializers import ServerCreateDocumentSerializer
 from core.models import Document, Invitation, User
+from core.services import mime_types
 from core.services.converter_services import ConversionError, YdocConverter
+from core.services.yhub_services import (
+    ServiceUnavailableError as YHubServiceUnavailableError,
+)
+from core.utils.analytics import PosthogEventName
 
 pytestmark = pytest.mark.django_db
 
 
+# the converter returns a raw Yjs update, saved by the collaboration server
+CONVERTED_CONTENT = b"Converted document content"
+
+
+@pytest.fixture(autouse=True, name="mock_yhub")
+def mock_yhub_fixture():
+    """No test of this module should reach the collaboration server."""
+    with patch("core.api.serializers.YHubService") as mock:
+        yield mock
+
+
 @pytest.fixture
 def mock_convert_md():
-    """Mock YdocConverter.convert_markdown to return a converted content."""
+    """Mock YdocConverter.convert to return a converted content."""
     with patch.object(
         YdocConverter,
-        "convert_markdown",
-        return_value="Converted document content",
+        "convert",
+        return_value=CONVERTED_CONTENT,
     ) as mock:
         yield mock
 
@@ -147,7 +166,7 @@ def test_api_documents_create_for_owner_invalid_sub():
     data = {
         "title": "My Document",
         "content": "Document content",
-        "sub": "123!!",
+        "sub": "invalid süb",
         "email": "john.doe@example.com",
     }
 
@@ -162,15 +181,12 @@ def test_api_documents_create_for_owner_invalid_sub():
     assert not Document.objects.exists()
 
     assert response.json() == {
-        "sub": [
-            "Enter a valid sub. This value may contain only letters, "
-            "numbers, and @/./+/-/_/: characters."
-        ]
+        "sub": ["Enter a valid sub. This value should be ASCII only."]
     }
 
 
 @override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
-def test_api_documents_create_for_owner_existing(mock_convert_md):
+def test_api_documents_create_for_owner_existing(mock_convert_md, mock_yhub):
     """
     It should be possible to create a document on behalf of a pre-existing user
     by passing their sub and email.
@@ -184,24 +200,48 @@ def test_api_documents_create_for_owner_existing(mock_convert_md):
         "email": "irrelevant@example.com",  # Should be ignored since the user already exists
     }
 
-    response = APIClient().post(
-        "/api/v1.0/documents/create-for-owner/",
-        data,
-        format="json",
-        HTTP_AUTHORIZATION="Bearer DummyToken",
-    )
+    with mock.patch("core.api.serializers.posthog_capture") as mock_capture:
+        response = APIClient().post(
+            "/api/v1.0/documents/create-for-owner/",
+            data,
+            format="json",
+            HTTP_AUTHORIZATION="Bearer DummyToken",
+        )
 
     assert response.status_code == 201
 
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     document = Document.objects.get()
     assert response.json() == {"id": str(document.id)}
 
     assert document.title == "My Document"
-    assert document.content == "Converted document content"
+    # the content is saved by the collaboration server, not by Django
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        document, CONVERTED_CONTENT
+    )
     assert document.creator == user
     assert document.accesses.filter(user=user, role="owner").exists()
+
+    mock_capture.assert_any_call(
+        PosthogEventName.DOC_CREATED,
+        user,
+        {},
+        document=document,
+    )
+    mock_capture.assert_any_call(
+        PosthogEventName.DOC_IMPORTED,
+        user,
+        {
+            "content_type": mime_types.MARKDOWN,
+            "create_for_owner": True,
+        },
+        document=document,
+    )
+
+    assert mock_capture.call_count == 2
 
     assert Invitation.objects.exists() is False
 
@@ -217,7 +257,7 @@ def test_api_documents_create_for_owner_existing(mock_convert_md):
 
 
 @override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
-def test_api_documents_create_for_owner_new_user(mock_convert_md):
+def test_api_documents_create_for_owner_new_user(mock_convert_md, mock_yhub):
     """
     It should be possible to create a document on behalf of new users by
     passing their unknown sub and email address.
@@ -229,24 +269,48 @@ def test_api_documents_create_for_owner_new_user(mock_convert_md):
         "email": "john.doe@example.com",  # Should be used to create a new user
     }
 
-    response = APIClient().post(
-        "/api/v1.0/documents/create-for-owner/",
-        data,
-        format="json",
-        HTTP_AUTHORIZATION="Bearer DummyToken",
-    )
+    with mock.patch("core.api.serializers.posthog_capture") as mock_capture:
+        response = APIClient().post(
+            "/api/v1.0/documents/create-for-owner/",
+            data,
+            format="json",
+            HTTP_AUTHORIZATION="Bearer DummyToken",
+        )
 
     assert response.status_code == 201
 
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     document = Document.objects.get()
     assert response.json() == {"id": str(document.id)}
 
     assert document.title == "My Document"
-    assert document.content == "Converted document content"
+    # the content is saved by the collaboration server, not by Django
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        document, CONVERTED_CONTENT
+    )
     assert document.creator is None
     assert document.accesses.exists() is False
+
+    mock_capture.assert_any_call(
+        PosthogEventName.DOC_CREATED,
+        None,
+        {},
+        document=document,
+    )
+    mock_capture.assert_any_call(
+        PosthogEventName.DOC_IMPORTED,
+        None,
+        {
+            "content_type": mime_types.MARKDOWN,
+            "create_for_owner": True,
+        },
+        document=document,
+    )
+
+    assert mock_capture.call_count == 2
 
     invitation = Invitation.objects.get()
     assert invitation.email == "john.doe@example.com"
@@ -268,17 +332,44 @@ def test_api_documents_create_for_owner_new_user(mock_convert_md):
     assert document.creator == user
 
 
+@override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
+def test_api_documents_create_for_owner_without_notification_email(mock_convert_md):
+    """The caller can disable the notification email when creating the document."""
+    data = {
+        "title": "My Document",
+        "content": "Document content",
+        "sub": "123",
+        "email": "john.doe@example.com",
+        "send_notification_email": False,
+    }
+
+    response = APIClient().post(
+        "/api/v1.0/documents/create-for-owner/",
+        data,
+        format="json",
+        HTTP_AUTHORIZATION="Bearer DummyToken",
+    )
+
+    assert response.status_code == 201
+    assert mock_convert_md.called is True
+    assert Document.objects.exists()
+    assert Invitation.objects.filter(
+        email="john.doe@example.com", role="owner"
+    ).exists()
+    assert len(mail.outbox) == 0
+
+
 @override_settings(
     SERVER_TO_SERVER_API_TOKENS=["DummyToken"],
     OIDC_FALLBACK_TO_EMAIL_FOR_IDENTIFICATION=True,
 )
 def test_api_documents_create_for_owner_existing_user_email_no_sub_with_fallback(
-    mock_convert_md,
+    mock_convert_md, mock_yhub
 ):
     """
     It should be possible to create a document on behalf of a pre-existing user for
     who the sub was not found if the settings allow it. This edge case should not
-    happen in a healthy OIDC federation but can be usefull if an OIDC provider modifies
+    happen in a healthy OIDC federation but can be useful if an OIDC provider modifies
     users sub on each login for example...
     """
     user = factories.UserFactory(language="en-us")
@@ -299,13 +390,18 @@ def test_api_documents_create_for_owner_existing_user_email_no_sub_with_fallback
 
     assert response.status_code == 201
 
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     document = Document.objects.get()
     assert response.json() == {"id": str(document.id)}
 
     assert document.title == "My Document"
-    assert document.content == "Converted document content"
+    # the content is saved by the collaboration server, not by Django
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        document, CONVERTED_CONTENT
+    )
     assert document.creator == user
     assert document.accesses.filter(user=user, role="owner").exists()
 
@@ -371,7 +467,7 @@ def test_api_documents_create_for_owner_existing_user_email_no_sub_no_fallback(
     OIDC_ALLOW_DUPLICATE_EMAILS=True,
 )
 def test_api_documents_create_for_owner_new_user_no_sub_no_fallback_allow_duplicate(
-    mock_convert_md,
+    mock_convert_md, mock_yhub
 ):
     """
     When a user does not match an existing sub and fallback to matching on email is
@@ -395,13 +491,18 @@ def test_api_documents_create_for_owner_new_user_no_sub_no_fallback_allow_duplic
         HTTP_AUTHORIZATION="Bearer DummyToken",
     )
     assert response.status_code == 201
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     document = Document.objects.get()
     assert response.json() == {"id": str(document.id)}
 
     assert document.title == "My Document"
-    assert document.content == "Converted document content"
+    # the content is saved by the collaboration server, not by Django
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        document, CONVERTED_CONTENT
+    )
     assert document.creator is None
     assert document.accesses.exists() is False
 
@@ -425,6 +526,41 @@ def test_api_documents_create_for_owner_new_user_no_sub_no_fallback_allow_duplic
     assert document.creator == user
 
 
+@pytest.mark.django_db(transaction=True)
+def test_api_documents_create_document_race_condition():
+    """
+    It should be possible to create several documents at the same time
+    without causing any race conditions or data integrity issues.
+    """
+
+    def create_document(title):
+        try:
+            user = factories.UserFactory()
+            client = APIClient()
+            client.force_login(user)
+            return client.post(
+                "/api/v1.0/documents/",
+                {
+                    "title": title,
+                },
+                format="json",
+            )
+        finally:
+            # Close this worker thread's thread-local database connection so it
+            # does not linger and block dropping the test database at teardown.
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future1 = executor.submit(create_document, "my document 1")
+        future2 = executor.submit(create_document, "my document 2")
+
+        response1 = future1.result()
+        response2 = future2.result()
+
+        assert response1.status_code == 201
+        assert response2.status_code == 201
+
+
 @patch.object(ServerCreateDocumentSerializer, "_send_email_notification")
 @override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"], LANGUAGE_CODE="de-de")
 def test_api_documents_create_for_owner_with_default_language(
@@ -446,7 +582,9 @@ def test_api_documents_create_for_owner_with_default_language(
     )
     assert response.status_code == 201
 
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
     assert mock_send.call_args[0][3] == "de-de"
 
 
@@ -473,7 +611,9 @@ def test_api_documents_create_for_owner_with_custom_language(mock_convert_md):
 
     assert response.status_code == 201
 
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     assert len(mail.outbox) == 1
     email = mail.outbox[0]
@@ -509,7 +649,9 @@ def test_api_documents_create_for_owner_with_custom_subject_and_message(
 
     assert response.status_code == 201
 
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     assert len(mail.outbox) == 1
     email = mail.outbox[0]
@@ -543,10 +685,48 @@ def test_api_documents_create_for_owner_with_converter_exception(
         format="json",
         HTTP_AUTHORIZATION="Bearer DummyToken",
     )
-    mock_convert_md.assert_called_once_with("Document content")
+    mock_convert_md.assert_called_once_with(
+        "Document content", mime_types.MARKDOWN, mime_types.YJS
+    )
 
     assert response.status_code == 400
     assert response.json() == {"content": ["Could not convert content"]}
+
+
+@override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
+@pytest.mark.usefixtures("mock_convert_md")
+def test_api_documents_create_for_owner_access_before_content(mock_yhub):
+    """
+    Accesses must exist before the content is sent to the collaboration server
+    so the owner has access to the very first version of the document.
+    """
+    user = factories.UserFactory()
+    accesses_at_save_time = []
+
+    def capturing_create_ydoc(document, _update):
+        accesses_at_save_time.extend(
+            list(document.accesses.values_list("user__sub", "role"))
+        )
+
+    mock_yhub.return_value.create_ydoc.side_effect = capturing_create_ydoc
+
+    data = {
+        "title": "My Document",
+        "content": "Document content",
+        "sub": str(user.sub),
+        "email": user.email,
+    }
+
+    response = APIClient().post(
+        "/api/v1.0/documents/create-for-owner/",
+        data,
+        format="json",
+        HTTP_AUTHORIZATION="Bearer DummyToken",
+    )
+
+    assert response.status_code == 201
+    # The owner access must already exist when the content is saved
+    assert (str(user.sub), "owner") in accesses_at_save_time
 
 
 @override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
@@ -573,3 +753,33 @@ def test_api_documents_create_for_owner_with_empty_content():
             "This field may not be blank.",
         ],
     }
+
+
+@override_settings(SERVER_TO_SERVER_API_TOKENS=["DummyToken"])
+@pytest.mark.usefixtures("mock_convert_md")
+def test_api_documents_create_for_owner_collaboration_server_unavailable(mock_yhub):
+    """
+    A document whose content could not be saved by the collaboration server
+    should not be created at all, neither should its access.
+    """
+    user = factories.UserFactory()
+    mock_yhub.return_value.create_ydoc.side_effect = YHubServiceUnavailableError(
+        "Failed to connect to the yhub service"
+    )
+
+    response = APIClient().post(
+        "/api/v1.0/documents/create-for-owner/",
+        {
+            "title": "My Document",
+            "content": "Document content",
+            "sub": str(user.sub),
+            "email": user.email,
+        },
+        format="json",
+        HTTP_AUTHORIZATION="Bearer DummyToken",
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"content": ["Could not save the document content"]}
+    assert Document.objects.exists() is False
+    assert len(mail.outbox) == 0

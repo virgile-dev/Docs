@@ -1,0 +1,142 @@
+import { VariantType } from '@gouvfr-lasuite/ui-components';
+import { t } from 'i18next';
+import { useCallback, useMemo } from 'react';
+import { useDropzone } from 'react-dropzone';
+
+import { useConfig } from '@/core';
+import { useToast } from '@/hooks';
+import { formatFileSize } from '@/utils';
+
+import { ContentTypes, useImportDoc } from '../api/useImportDoc';
+import { Doc } from '../types';
+
+interface UseImportProps {
+  onDragOver?: (isDragOver: boolean) => void;
+  onImportSuccess?: (doc: Doc) => void;
+}
+
+interface AcceptedMap {
+  [mime: string]: string[];
+}
+
+export const useImport = ({ onDragOver, onImportSuccess }: UseImportProps) => {
+  const { toast } = useToast();
+  const { data: config } = useConfig();
+
+  const MAX_FILE_SIZE = useMemo(() => {
+    const maxSizeInBytes = config?.CONVERSION_FILE_MAX_SIZE ?? 10 * 1024 * 1024; // Default to 10MB
+
+    return {
+      bytes: maxSizeInBytes,
+      text: formatFileSize(maxSizeInBytes),
+    };
+  }, [config?.CONVERSION_FILE_MAX_SIZE]);
+
+  const ACCEPT = useMemo((): AcceptedMap => {
+    const allowedExtensions = config?.CONVERSION_FILE_EXTENSIONS_ALLOWED?.map(
+      (ext: string) => ext.toLowerCase(),
+    ) ?? ['.docx', '.md'];
+
+    return Object.values(ContentTypes).reduce(
+      (acc: AcceptedMap, contentType) => {
+        const matchedExtensions = contentType.extensions.filter((ext: string) =>
+          allowedExtensions.includes(ext),
+        );
+
+        if (matchedExtensions.length > 0) {
+          acc[contentType.mime] = matchedExtensions;
+        }
+
+        return acc;
+      },
+      {},
+    );
+  }, [config?.CONVERSION_FILE_EXTENSIONS_ALLOWED]);
+
+  const toastInvalidFileType = useCallback(
+    (fileName: string) => {
+      const allowedExtensions = Object.values(ACCEPT).flat().join(', ');
+      toast(
+        allowedExtensions
+          ? t(
+              `The document "{{documentName}}" import has failed (only {{allowedExtensions}} files are allowed)`,
+              {
+                description:
+                  'Toast shown when a file to import has an unsupported type',
+                documentName: fileName,
+                allowedExtensions,
+              },
+            )
+          : t(`The document "{{documentName}}" import has failed`, {
+              description:
+                'Toast shown when importing a file as a document failed',
+              documentName: fileName,
+            }),
+        VariantType.ERROR,
+      );
+    },
+    [ACCEPT, toast],
+  );
+
+  const { getRootProps, getInputProps, open } = useDropzone({
+    accept: ACCEPT,
+    maxSize: MAX_FILE_SIZE.bytes,
+    onDrop(acceptedFiles) {
+      onDragOver?.(false);
+      const allowedExtensions = Object.values(ACCEPT).flat();
+      for (const file of acceptedFiles) {
+        const ext = `.${file.name.split('.').pop()?.toLowerCase()}`;
+        if (!allowedExtensions.includes(ext)) {
+          toastInvalidFileType(file.name);
+          continue;
+        }
+        importDoc([file, file.type], {
+          onSuccess: (doc: Doc) => {
+            onImportSuccess?.(doc);
+          },
+        });
+      }
+    },
+    onDragEnter: () => {
+      onDragOver?.(true);
+    },
+    onDragLeave: () => {
+      onDragOver?.(false);
+    },
+    onDropRejected(fileRejections) {
+      fileRejections.forEach((rejection) => {
+        const isFileTooLarge = rejection.errors.some(
+          (error) => error.code === 'file-too-large',
+        );
+
+        if (isFileTooLarge) {
+          toast(
+            t(
+              'The document "{{documentName}}" is too large. Maximum file size is {{maxFileSize}}.',
+              {
+                description:
+                  'Toast shown when an imported file exceeds the size limit',
+                documentName: rejection.file.name,
+                maxFileSize: MAX_FILE_SIZE.text,
+              },
+            ),
+            VariantType.ERROR,
+          );
+        } else {
+          toastInvalidFileType(rejection.file.name);
+        }
+      });
+    },
+    noClick: true,
+    noKeyboard: true,
+  });
+  const { mutate: importDoc, isPending } = useImportDoc();
+
+  return {
+    getRootProps,
+    getInputProps,
+    open,
+    isEnabled: config?.CONVERSION_UPLOAD_ENABLED || false,
+    isPending,
+  };
+};

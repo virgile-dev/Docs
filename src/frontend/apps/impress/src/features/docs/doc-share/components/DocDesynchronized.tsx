@@ -1,0 +1,84 @@
+import { Button, VariantType } from '@gouvfr-lasuite/ui-components';
+import { useTranslation } from 'react-i18next';
+
+import { Box, Card, Text } from '@/components';
+import { useCunninghamTheme } from '@/cunningham';
+import { Doc, KEY_DOC, KEY_LIST_DOC } from '@/docs/doc-management';
+import { useToast } from '@/hooks';
+
+import { useUpdateDocLink } from '../api/useUpdateDocLink';
+
+import Desync from './../assets/desynchro.svg';
+import Undo from './../assets/undo.svg';
+
+interface DocDesynchronizedProps {
+  doc: Doc;
+}
+
+export const DocDesynchronized = ({ doc }: DocDesynchronizedProps) => {
+  const { t } = useTranslation();
+  const { spacingsTokens } = useCunninghamTheme();
+  const { toast } = useToast();
+
+  const { mutate: updateDocLink } = useUpdateDocLink({
+    listInvalidQueries: [KEY_LIST_DOC, KEY_DOC],
+    onSuccess: () => {
+      toast(
+        t('The document visibility restored.', {
+          description:
+            "Toast shown after resetting link sharing to the parent's settings",
+        }),
+        VariantType.SUCCESS,
+        {
+          duration: 2000,
+        },
+      );
+    },
+  });
+
+  return (
+    <Card
+      $padding="3xs"
+      $direction="row"
+      $align="center"
+      $justify="space-between"
+      $gap={spacingsTokens['4xs']}
+      $theme="brand"
+    >
+      <Box
+        $withThemeInherited
+        $direction="row"
+        $align="center"
+        $gap={spacingsTokens['3xs']}
+      >
+        <Desync />
+        <Text $size="xs" $withThemeInherited $weight="400">
+          {t('The link sharing rules differ from the parent document', {
+            description:
+              'Banner shown on a sub-doc whose link settings differ from its parent',
+          })}
+        </Text>
+      </Box>
+      {doc.abilities.accesses_manage && (
+        <Button
+          onClick={() =>
+            updateDocLink({
+              id: doc.id,
+              link_reach: doc.ancestors_link_reach,
+              link_role: doc?.ancestors_link_role || undefined,
+            })
+          }
+          size="small"
+          color="brand"
+          variant="tertiary"
+          icon={<Undo />}
+        >
+          {t('Restore', {
+            description:
+              'Button to restore a deleted document or an older version',
+          })}
+        </Button>
+      )}
+    </Card>
+  );
+};

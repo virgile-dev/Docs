@@ -1,0 +1,1251 @@
+"""
+Test file uploads API endpoint for users in impress's core app.
+"""
+
+# pylint: disable=too-many-lines
+import uuid
+from io import BytesIO
+from unittest import mock
+from urllib.parse import urlparse
+
+from django.core.files.storage import default_storage
+from django.db import connection
+from django.utils import timezone
+
+import pycrdt
+import pytest
+import requests
+from freezegun import freeze_time
+from rest_framework.test import APIClient
+
+from core import factories, models
+from core.factories import YDOC_HELLO_WORLD_UPDATE
+from core.services.yhub_services import (
+    APIError,
+)
+from core.services.yhub_services import (
+    ServiceUnavailableError as YHubServiceUnavailableError,
+)
+
+pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True, name="mock_yhub")
+def mock_yhub_fixture():
+    """
+    The content of a document is held by the collaboration server.
+
+    It stands for a server holding content for every document, which is what an
+    editor connected to it would have saved; the database holds none of it. A
+    test caring about the content of a given document declares it in
+    `mock_yhub.contents`, keyed by document id.
+    """
+    contents = {}
+
+    def get_ydoc(document):
+        return contents.get(document.id, YDOC_HELLO_WORLD_UPDATE)
+
+    with mock.patch("core.api.viewsets.YHubService") as mock_service:
+        mock_service.return_value.get_ydoc.side_effect = get_ydoc
+        mock_service.contents = contents
+        yield mock_service
+
+
+PIXEL = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00"
+    b"\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe"
+    b"\xa7V\xbd\xfa\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def get_image_refs(document_id):
+    """Generate an image key for testing."""
+    image_key = f"{document_id!s}/attachments/{uuid.uuid4()!s}.png"
+    default_storage.connection.meta.client.put_object(
+        Bucket=default_storage.bucket_name,
+        Key=image_key,
+        Body=BytesIO(PIXEL),
+        ContentType="image/png",
+    )
+    return image_key, f"http://localhost/media/{image_key:s}"
+
+
+def test_api_documents_duplicate_forbidden():
+    """A user who doesn't have read access to a document should not be allowed to duplicate it."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        document = factories.DocumentFactory(
+            link_reach="restricted",
+            users=[factories.UserFactory()],
+            title="my document",
+        )
+
+    response = client.post(f"/api/v1.0/documents/{document.id!s}/duplicate/")
+
+    assert response.status_code == 403
+    assert models.Document.objects.count() == 1
+    mock_capture.assert_not_called()
+
+
+def test_api_documents_duplicate_anonymous():
+    """Anonymous users should not be able to duplicate documents even with read access."""
+
+    document = factories.DocumentFactory(link_reach="public", link_role="reader")
+
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = APIClient().post(f"/api/v1.0/documents/{document.id!s}/duplicate/")
+
+    assert response.status_code == 401
+    assert models.Document.objects.count() == 1
+    mock_capture.assert_not_called()
+
+
+@pytest.mark.parametrize("index", range(3))
+def test_api_documents_duplicate_success(index, mock_yhub, settings):
+    """
+    Anonymous users should be able to retrieve attachments linked to a public document.
+    Accesses should not be duplicated if the user does not request it specifically.
+    Attachments that are not in the content should not be passed for access in the
+    duplicated document's "attachments" list.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document_ids = [uuid.uuid4() for _ in range(3)]
+    image_refs = [get_image_refs(doc_id) for doc_id in document_ids]
+
+    # Create document content with the first image only
+    ydoc = pycrdt.Doc()
+    fragment = pycrdt.XmlFragment(
+        [
+            pycrdt.XmlElement("img", {"src": image_refs[0][1]}),
+        ]
+    )
+    ydoc["document-store"] = fragment
+    update = ydoc.get_update()
+
+    # Create documents
+    document = factories.DocumentFactory(
+        id=document_ids[index],
+        link_reach="restricted",
+        users=[user, factories.UserFactory()],
+        title="document with an image",
+        attachments=[key for key, _ in image_refs],
+        # The original document is a favorite: the duplicate should not be one
+        favorited_by=[user],
+    )
+    mock_yhub.contents[document.id] = update
+    factories.DocumentFactory(id=document_ids[(index + 1) % 3])
+    # Don't create document for third ID to check that it doesn't impact access to attachments
+
+    # Duplicate the document via the API endpoint
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(f"/api/v1.0/documents/{document.id}/duplicate/")
+
+    assert response.status_code == 201
+
+    duplicated_document = models.Document.objects.get(id=response.json()["id"])
+    assert duplicated_document.title == "document with an image (copy)"
+    # the content is copied through the collaboration server
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        duplicated_document, update
+    )
+    assert duplicated_document.creator == user
+    assert duplicated_document.link_reach == "restricted"
+    assert duplicated_document.link_role == "reader"
+    assert duplicated_document.duplicated_from == document
+    assert duplicated_document.attachments == [
+        image_refs[0][0]
+    ]  # Only the first image key
+    assert duplicated_document.get_parent() == document.get_parent()
+    assert duplicated_document.path == document.get_last_sibling().path
+
+    assert response.json() == {
+        "id": str(duplicated_document.id),
+        "abilities": duplicated_document.get_abilities(user),
+        "ancestors_link_reach": None,
+        "ancestors_link_role": None,
+        "computed_link_reach": duplicated_document.computed_link_reach,
+        "computed_link_role": duplicated_document.computed_link_role,
+        "created_at": duplicated_document.created_at.isoformat().replace("+00:00", "Z"),
+        "creator": str(user.id),
+        "deleted_at": None,
+        "depth": duplicated_document.depth,
+        "excerpt": duplicated_document.excerpt,
+        "is_favorite": False,
+        "link_reach": duplicated_document.link_reach,
+        "link_role": duplicated_document.link_role,
+        "nb_accesses_ancestors": duplicated_document.nb_accesses_ancestors,
+        "nb_accesses_direct": duplicated_document.nb_accesses_direct,
+        "numchild": 0,
+        "path": duplicated_document.path,
+        "title": "document with an image (copy)",
+        "updated_at": duplicated_document.updated_at.isoformat().replace("+00:00", "Z"),
+        "user_role": "owner",
+    }
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(document.id)},
+        document=duplicated_document,
+    )
+
+    # Check that accesses were not duplicated.
+    # The user who did the duplicate is forced as owner
+    assert duplicated_document.accesses.count() == 1
+    access = duplicated_document.accesses.first()
+    assert access.user == user
+    assert access.role == "owner"
+
+    # Ensure access persists after the owner loses access to the original document
+    models.DocumentAccess.objects.filter(document=document).delete()
+
+    now = timezone.now()
+    with freeze_time(now):
+        response = client.get(
+            "/api/v1.0/documents/media-auth/", HTTP_X_ORIGINAL_URL=image_refs[0][1]
+        )
+
+    assert response.status_code == 200
+    assert response["X-Amz-Date"] == now.strftime("%Y%m%dT%H%M%SZ")
+    authorization = response["Authorization"]
+    assert "AWS4-HMAC-SHA256 Credential=" in authorization
+    assert (
+        "SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature="
+        in authorization
+    )
+
+    s3_url = urlparse(settings.AWS_S3_ENDPOINT_URL)
+    response = requests.get(
+        f"{settings.AWS_S3_ENDPOINT_URL:s}/impress-media-storage/{image_refs[0][0]:s}",
+        headers={
+            "authorization": authorization,
+            "x-amz-date": response["x-amz-date"],
+            "x-amz-content-sha256": response["x-amz-content-sha256"],
+            "Host": f"{s3_url.hostname:s}:{s3_url.port:d}",
+        },
+        timeout=1,
+    )
+    assert response.content == PIXEL
+
+    # Ensure the other images are not accessible
+    for _, url in image_refs[1:]:
+        response = client.get(
+            "/api/v1.0/documents/media-auth/", HTTP_X_ORIGINAL_URL=url
+        )
+        assert response.status_code == 403
+
+
+@pytest.mark.parametrize("role", ["owner", "administrator"])
+def test_api_documents_duplicate_with_accesses_admin(role, mock_yhub):
+    """
+    Accesses should be duplicated if the user requests it specifically and is owner or admin.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    documents_before = factories.DocumentFactory.create_batch(20)
+    document = factories.DocumentFactory(
+        users=[(user, role)],
+        title="document with accesses",
+    )
+    user_access = factories.UserDocumentAccessFactory(document=document)
+    team_access = factories.TeamDocumentAccessFactory(document=document)
+
+    documents_after = factories.DocumentFactory.create_batch(20)
+
+    all_documents = documents_before + [document] + documents_after
+
+    paths = {document.pk: document.path for document in all_documents}
+
+    # Duplicate the document via the API endpoint requesting to duplicate accesses
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{document.id!s}/duplicate/",
+            {"with_accesses": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+
+    duplicated_document = models.Document.objects.get(id=response.json()["id"])
+    assert duplicated_document.title == "document with accesses (copy)"
+    # the content is copied through the collaboration server
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        duplicated_document, YDOC_HELLO_WORLD_UPDATE
+    )
+    assert duplicated_document.link_reach == document.link_reach
+    assert duplicated_document.link_role == document.link_role
+    assert duplicated_document.creator == user
+    assert duplicated_document.duplicated_from == document
+    assert duplicated_document.attachments == []
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(document.id)},
+        document=duplicated_document,
+    )
+
+    # Check that accesses were duplicated and the user who did the duplicate is forced as owner
+    duplicated_accesses = duplicated_document.accesses
+    assert duplicated_accesses.count() == 3
+    assert duplicated_accesses.get(user=user).role == "owner"
+    assert duplicated_accesses.get(user=user_access.user).role == user_access.role
+    assert duplicated_accesses.get(team=team_access.team).role == team_access.role
+
+    for document in all_documents:
+        document.refresh_from_db()
+        assert document.path == paths[document.id]
+
+
+@pytest.mark.parametrize("role", ["editor", "reader"])
+def test_api_documents_duplicate_with_accesses_non_admin(role, mock_yhub):
+    """
+    Accesses should not be duplicated if the user requests it specifically and is not owner
+    or admin.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(
+        users=[(user, role)],
+        title="document with accesses",
+    )
+    factories.UserDocumentAccessFactory(document=document)
+    factories.TeamDocumentAccessFactory(document=document)
+
+    # Duplicate the document via the API endpoint requesting to duplicate accesses
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{document.id!s}/duplicate/",
+            {"with_accesses": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+
+    duplicated_document = models.Document.objects.get(id=response.json()["id"])
+    assert duplicated_document.title == "document with accesses (copy)"
+    # the content is copied through the collaboration server
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        duplicated_document, YDOC_HELLO_WORLD_UPDATE
+    )
+    assert duplicated_document.link_reach == document.link_reach
+    assert duplicated_document.link_role == document.link_role
+    assert duplicated_document.creator == user
+    assert duplicated_document.duplicated_from == document
+    assert duplicated_document.attachments == []
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(document.id)},
+        document=duplicated_document,
+    )
+
+    # Check that accesses were duplicated and the user who did the duplicate is forced as owner
+    duplicated_accesses = duplicated_document.accesses
+    assert duplicated_accesses.count() == 1
+    assert duplicated_accesses.get(user=user).role == "owner"
+
+
+@pytest.mark.parametrize("role", ["editor", "reader"])
+def test_api_documents_duplicate_non_root_document(role, mock_yhub):
+    """
+    Non-root documents can be duplicated but without accesses.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[(user, "owner")])
+    child = factories.DocumentFactory(
+        parent=document, users=[(user, role)], title="document with accesses"
+    )
+
+    assert child.accesses.count() == 1
+
+    # Duplicate the document via the API endpoint requesting to duplicate accesses
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{child.id!s}/duplicate/",
+            {"with_accesses": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+
+    duplicated_document = models.Document.objects.get(id=response.json()["id"])
+    assert duplicated_document.title == "document with accesses (copy)"
+    # the content is copied through the collaboration server
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        duplicated_document, YDOC_HELLO_WORLD_UPDATE
+    )
+    assert duplicated_document.link_reach == child.link_reach
+    assert duplicated_document.link_role == child.link_role
+    assert duplicated_document.creator == user
+    assert duplicated_document.duplicated_from == child
+    assert duplicated_document.attachments == []
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(child.id)},
+        document=duplicated_document,
+    )
+
+    # No access should be created for non root documents
+    duplicated_accesses = duplicated_document.accesses
+    assert duplicated_accesses.count() == 0
+    assert duplicated_document.is_sibling_of(child)
+    assert duplicated_document.is_child_of(document)
+
+
+def test_api_documents_duplicate_reader_non_root_document():
+    """
+    Reader users should be able to duplicate non-root documents but will be
+    created as a root document.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[(user, "reader")])
+    child = factories.DocumentFactory(parent=document)
+
+    assert child.get_role(user) == "reader"
+
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{child.id!s}/duplicate/", format="json"
+        )
+    assert response.status_code == 201
+
+    duplicated_document = models.Document.objects.get(id=response.json()["id"])
+    assert duplicated_document.is_root()
+    assert duplicated_document.accesses.count() == 1
+    assert duplicated_document.accesses.get(user=user).role == "owner"
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(child.id)},
+        document=duplicated_document,
+    )
+
+
+def test_api_documents_duplicate_with_descendants_simple():
+    """
+    Duplicating a document with descendants flag should recursively duplicate all children.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create document tree
+    root = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="Root Document",
+    )
+    child1 = factories.DocumentFactory(
+        parent=root,
+        title="Child 1",
+    )
+    child2 = factories.DocumentFactory(
+        parent=root,
+        title="Child 2",
+    )
+
+    initial_count = models.Document.objects.count()
+    assert initial_count == 3
+
+    # Duplicate with descendants
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    # Check that all documents were duplicated (6 total: 3 original + 3 duplicated)
+    assert models.Document.objects.count() == 6
+
+    # Check root duplication
+    assert duplicated_root.title == "Root Document (copy)"
+    assert duplicated_root.creator == user
+    assert duplicated_root.duplicated_from == root
+    assert duplicated_root.get_children().count() == 2
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Check children duplication
+    duplicated_children = duplicated_root.get_children().order_by("title")
+    assert duplicated_children.count() == 2
+
+    duplicated_child1 = duplicated_children.first()
+    assert duplicated_child1.title == "Child 1"
+    assert duplicated_child1.creator == user
+    assert duplicated_child1.duplicated_from == child1
+    assert duplicated_child1.get_parent() == duplicated_root
+
+    duplicated_child2 = duplicated_children.last()
+    assert duplicated_child2.title == "Child 2"
+    assert duplicated_child2.creator == user
+    assert duplicated_child2.duplicated_from == child2
+    assert duplicated_child2.get_parent() == duplicated_root
+
+
+@pytest.mark.parametrize(
+    "title, expected_title",
+    [
+        ("Roadmap", "Roadmap (copy)"),
+        ("🚀 Roadmap", "🚀 Roadmap (copy)"),
+        (None, "Untitled document (copy)"),
+        ("", "Untitled document (copy)"),
+        ("a" * 248, f"{'a' * 248} (copy)"),
+        ("a" * 249, f"{'a' * 245}... (copy)"),
+        ("a" * 255, f"{'a' * 245}... (copy)"),
+        (f"{'a' * 244} {'b' * 10}", f"{'a' * 244}... (copy)"),
+    ],
+)
+def test_api_documents_duplicate_title(title, expected_title):
+    """
+    The duplicate is marked as a copy at the end of its title, so that a leading
+    emoji, used as the document icon, stays first. An untitled document gets a
+    title saying it is a copy. A title too long to be marked within the maximum
+    length of a title is truncated, with an ellipsis, before the copy marker.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[(user, "owner")], title=title)
+
+    with mock.patch("core.api.viewsets.posthog_capture"):
+        response = client.post(
+            f"/api/v1.0/documents/{document.id!s}/duplicate/", format="json"
+        )
+
+    assert response.status_code == 201
+    assert response.json()["title"] == expected_title
+    assert models.Document.objects.get(id=response.json()["id"]).title == (
+        expected_title
+    )
+
+
+def test_api_documents_duplicate_with_descendants_keeps_descendant_titles():
+    """
+    Only the top duplicate is marked as a copy: its descendants keep their title
+    untouched, leading emoji and absence of title included.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    root = factories.DocumentFactory(users=[(user, "owner")], title="Handbook")
+    emoji_child = factories.DocumentFactory(parent=root, title="🚀 Onboarding")
+    untitled_child = factories.DocumentFactory(parent=root, title=None)
+    untitled_grandchild = factories.DocumentFactory(parent=untitled_child, title="")
+
+    with mock.patch("core.api.viewsets.posthog_capture"):
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+    assert duplicated_root.title == "Handbook (copy)"
+
+    duplicated_titles = {
+        duplicate.duplicated_from_id: duplicate.title
+        for duplicate in duplicated_root.get_descendants()
+    }
+    assert duplicated_titles == {
+        emoji_child.id: "🚀 Onboarding",
+        untitled_child.id: None,
+        untitled_grandchild.id: "",
+    }
+
+
+def test_api_documents_duplicate_with_descendants_multi_level():
+    """
+    Duplicating should recursively handle multiple levels of nesting.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    root = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="Level 0",
+    )
+    child = factories.DocumentFactory(
+        parent=root,
+        title="Level 1",
+    )
+    grandchild = factories.DocumentFactory(
+        parent=child,
+        title="Level 2",
+    )
+    great_grandchild = factories.DocumentFactory(
+        parent=grandchild,
+        title="Level 3",
+    )
+
+    initial_count = models.Document.objects.count()
+    assert initial_count == 4
+
+    # Duplicate with descendants
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Check that all documents were duplicated
+    assert models.Document.objects.count() == 8
+
+    # Verify the tree structure
+    assert duplicated_root.depth == root.depth
+    dup_children = duplicated_root.get_children()
+    assert dup_children.count() == 1
+
+    dup_child = dup_children.first()
+    assert dup_child.title == "Level 1"
+    assert dup_child.duplicated_from == child
+    dup_grandchildren = dup_child.get_children()
+    assert dup_grandchildren.count() == 1
+
+    dup_grandchild = dup_grandchildren.first()
+    assert dup_grandchild.title == "Level 2"
+    assert dup_grandchild.duplicated_from == grandchild
+    dup_great_grandchildren = dup_grandchild.get_children()
+    assert dup_great_grandchildren.count() == 1
+
+    dup_great_grandchild = dup_great_grandchildren.first()
+    assert dup_great_grandchild.title == "Level 3"
+    assert dup_great_grandchild.duplicated_from == great_grandchild
+
+
+# pylint: disable=too-many-locals
+def test_api_documents_duplicate_with_descendants_and_attachments(mock_yhub):
+    """
+    Duplicating with descendants should properly handle attachments in all children.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create documents with attachments
+    root_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    image_key_root, image_url_root = get_image_refs(root_id)
+    image_key_child, image_url_child = get_image_refs(child_id)
+
+    # Create root document with attachment
+    ydoc = pycrdt.Doc()
+    fragment = pycrdt.XmlFragment(
+        [
+            pycrdt.XmlElement("img", {"src": image_url_root}),
+        ]
+    )
+    ydoc["document-store"] = fragment
+    root_update = ydoc.get_update()
+
+    root = factories.DocumentFactory(
+        id=root_id,
+        users=[(user, "owner")],
+        title="Root with Image",
+        attachments=[image_key_root],
+    )
+    mock_yhub.contents[root.id] = root_update
+
+    # Create child with different attachment
+    ydoc_child = pycrdt.Doc()
+    fragment_child = pycrdt.XmlFragment(
+        [
+            pycrdt.XmlElement("img", {"src": image_url_child}),
+        ]
+    )
+    ydoc_child["document-store"] = fragment_child
+    child_update = ydoc_child.get_update()
+
+    # child
+    child = factories.DocumentFactory(
+        id=child_id,
+        parent=root,
+        title="Child with Image",
+        attachments=[image_key_child],
+    )
+    mock_yhub.contents[child.id] = child_update
+
+    # Duplicate with descendants
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Check root attachments
+    assert duplicated_root.attachments == [image_key_root]
+
+    # Check child attachments
+    dup_children = duplicated_root.get_children()
+    assert dup_children.count() == 1
+    dup_child = dup_children.first()
+    assert dup_child.attachments == [image_key_child]
+
+    # the content of the whole subtree is copied through the collaboration server
+    assert mock_yhub.return_value.create_ydoc.call_args_list == [
+        mock.call(duplicated_root, root_update),
+        mock.call(dup_child, child_update),
+    ]
+
+
+def test_api_documents_duplicate_with_descendants_and_accesses():
+    """
+    Duplicating with descendants and accesses should propagate accesses to all children.
+    """
+    user = factories.UserFactory()
+    other_user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create document tree with accesses
+    root = factories.DocumentFactory(
+        users=[(user, "owner"), (other_user, "editor")],
+        title="Root",
+    )
+    child = factories.DocumentFactory(
+        parent=root,
+        title="Child",
+    )
+    factories.UserDocumentAccessFactory(document=child, user=other_user, role="reader")
+
+    # Duplicate with descendants and accesses
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True, "with_accesses": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Check root accesses (should be duplicated)
+    root_accesses = duplicated_root.accesses.order_by("user_id")
+    assert root_accesses.count() == 2
+    assert root_accesses.get(user=user).role == "owner"
+    assert root_accesses.get(user=other_user).role == "editor"
+
+    # Check child accesses (should be duplicated)
+    dup_children = duplicated_root.get_children()
+    dup_child = dup_children.first()
+    child_accesses = dup_child.accesses.order_by("user_id")
+    assert child_accesses.count() == 1
+    assert child_accesses.get(user=other_user).role == "reader"
+
+
+@pytest.mark.parametrize("role", ["editor", "reader"])
+def test_api_documents_duplicate_with_descendants_non_root_document_becomes_root(role):
+    """
+    When duplicating a non-root document with descendants as a reader/editor,
+    it should become a root document and still duplicate its children.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    parent = factories.DocumentFactory(users=[(user, "owner")])
+    child = factories.DocumentFactory(
+        parent=parent,
+        users=[(user, role)],
+        title="Sub Document",
+    )
+    grandchild = factories.DocumentFactory(
+        parent=child,
+        title="Grandchild",
+    )
+
+    assert child.is_child_of(parent)
+
+    # Duplicate the child (non-root) with descendants
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{child.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_child = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(child.id)},
+        document=duplicated_child,
+    )
+
+    assert duplicated_child.title == "Sub Document (copy)"
+
+    dup_grandchildren = duplicated_child.get_children()
+    assert dup_grandchildren.count() == 1
+    dup_grandchild = dup_grandchildren.first()
+    assert dup_grandchild.title == "Grandchild"
+    assert dup_grandchild.duplicated_from == grandchild
+
+
+def test_api_documents_duplicate_without_descendants_should_not_duplicate_children():
+    """
+    When with_descendants is not set or False, children should not be duplicated.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create document tree
+    root = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="Root",
+    )
+    # child
+    factories.DocumentFactory(
+        parent=root,
+        title="Child",
+    )
+
+    initial_count = models.Document.objects.count()
+    assert initial_count == 2
+
+    # Duplicate without descendants (default behavior)
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Only root should be duplicated, not children
+    assert models.Document.objects.count() == 3
+    assert duplicated_root.get_children().count() == 0
+
+
+def test_api_documents_duplicate_with_descendants_disabled_by_feature_flag(settings):
+    """
+    When DUPLICATE_CHILDREN_FEATURE_ENABLED is off, requesting with_descendants=True
+    should be ignored server-side and children should not be duplicated, regardless
+    of what the client sends.
+    """
+    settings.DUPLICATE_CHILDREN_FEATURE_ENABLED = False
+
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create document tree
+    root = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="Root",
+    )
+    # child
+    factories.DocumentFactory(
+        parent=root,
+        title="Child",
+    )
+
+    initial_count = models.Document.objects.count()
+    assert initial_count == 2
+
+    # Duplicate requesting descendants while the feature is disabled
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Only root should be duplicated, not children
+    assert models.Document.objects.count() == 3
+    assert duplicated_root.get_children().count() == 0
+
+
+def test_api_documents_duplicate_with_descendants_preserves_link_configuration():
+    """
+    Duplicating with descendants should preserve link configuration (link_reach, link_role)
+    for all children when with_accesses is True.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create document tree with specific link configurations
+    root = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="Root",
+        link_reach="public",
+        link_role="reader",
+    )
+    child = factories.DocumentFactory(
+        parent=root,
+        title="Child",
+        link_reach="restricted",
+        link_role="editor",
+    )
+
+    # Duplicate with descendants and accesses
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True, "with_accesses": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # Check root link configuration
+    assert duplicated_root.link_reach == root.link_reach
+    assert duplicated_root.link_role == root.link_role
+
+    # Check child link configuration
+    dup_children = duplicated_root.get_children()
+    dup_child = dup_children.first()
+    assert dup_child.link_reach == child.link_reach
+    assert dup_child.link_role == child.link_role
+
+
+def test_api_documents_duplicate_with_descendants_complex_tree():
+    """
+    Test duplication of a complex tree structure with multiple branches.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    # Create a complex tree:
+    #     root
+    #    /    \
+    #   c1     c2
+    #  /  \     \
+    # gc1 gc2   gc3
+    root = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="Root",
+    )
+    child1 = factories.DocumentFactory(parent=root, title="Child 1")
+    child2 = factories.DocumentFactory(parent=root, title="Child 2")
+    _grandchild1 = factories.DocumentFactory(parent=child1, title="GrandChild 1")
+    _grandchild2 = factories.DocumentFactory(parent=child1, title="GrandChild 2")
+    _grandchild3 = factories.DocumentFactory(parent=child2, title="GrandChild 3")
+
+    initial_count = models.Document.objects.count()
+    assert initial_count == 6
+
+    # Duplicate with descendants
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 201
+    duplicated_root = models.Document.objects.get(id=response.json()["id"])
+
+    mock_capture.assert_called_once_with(
+        "doc_duplicated",
+        user,
+        {"duplicated_from": str(root.id)},
+        document=duplicated_root,
+    )
+
+    # All documents should be duplicated
+    assert models.Document.objects.count() == 12
+
+    # Check structure is preserved
+    dup_children = duplicated_root.get_children().order_by("title")
+    assert dup_children.count() == 2
+
+    dup_child1 = dup_children.first()
+    assert dup_child1.title == "Child 1"
+    dup_grandchildren1 = dup_child1.get_children().order_by("title")
+    assert dup_grandchildren1.count() == 2
+    assert dup_grandchildren1.first().title == "GrandChild 1"
+    assert dup_grandchildren1.last().title == "GrandChild 2"
+
+    dup_child2 = dup_children.last()
+    assert dup_child2.title == "Child 2"
+    dup_grandchildren2 = dup_child2.get_children()
+    assert dup_grandchildren2.count() == 1
+    assert dup_grandchildren2.first().title == "GrandChild 3"
+
+
+def test_api_documents_duplicate_content_from_collaboration_server(mock_yhub):
+    """
+    The content held by the collaboration server is the one duplicated, the
+    content Django may still store for the document is ignored.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    image_key, image_url = get_image_refs(uuid.uuid4())
+
+    # what the collaboration server holds, an image Django never saw
+    ydoc = pycrdt.Doc()
+    ydoc["document-store"] = pycrdt.XmlFragment(
+        [pycrdt.XmlElement("img", {"src": image_url})]
+    )
+    edited_update = ydoc.get_update()
+    mock_yhub.return_value.get_ydoc.side_effect = None
+    mock_yhub.return_value.get_ydoc.return_value = edited_update
+
+    document = factories.DocumentFactory(
+        users=[(user, "owner")],
+        title="an edited document",
+        attachments=[image_key],
+    )
+
+    response = client.post(f"/api/v1.0/documents/{document.id!s}/duplicate/")
+
+    assert response.status_code == 201
+    duplicated_document = models.Document.objects.get(id=response.json()["id"])
+
+    mock_yhub.return_value.get_ydoc.assert_called_once_with(document)
+    mock_yhub.return_value.create_ydoc.assert_called_once_with(
+        duplicated_document, edited_update
+    )
+    # the attachments are the ones of the duplicated state, not of Django's
+    assert duplicated_document.attachments == [image_key]
+
+
+def test_api_documents_duplicate_collaboration_server_unavailable(mock_yhub):
+    """A document whose content cannot be copied should not be duplicated."""
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[(user, "owner")], title="my document")
+    mock_yhub.return_value.create_ydoc.side_effect = YHubServiceUnavailableError(
+        "Failed to connect to the yhub service"
+    )
+
+    response = client.post(f"/api/v1.0/documents/{document.id!s}/duplicate/")
+
+    assert response.status_code == 500
+    assert models.Document.objects.count() == 1
+
+
+def test_api_documents_duplicate_content_fetch_fails(mock_yhub):
+    """
+    A document whose content cannot be read from the collaboration server
+    should not be duplicated either: no copy is left in the database, and
+    nothing is seeded nor deleted there.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[(user, "owner")], title="my document")
+    mock_yhub.return_value.get_ydoc.side_effect = YHubServiceUnavailableError(
+        "Failed to connect to the yhub service"
+    )
+
+    response = client.post(f"/api/v1.0/documents/{document.id!s}/duplicate/")
+
+    assert response.status_code == 500
+    assert models.Document.objects.count() == 1
+    mock_yhub.return_value.create_ydoc.assert_not_called()
+    mock_yhub.return_value.delete_ydoc.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_api_documents_duplicate_content_seeded_outside_transaction(mock_yhub):
+    """
+    The calls seeding the content of a duplicate must happen after the
+    transaction that replicated the structure is committed: holding it open
+    across the calls to the collaboration server is what made a duplication
+    hold database locks for the duration of every call.
+
+    `transaction=True` is what makes the assertion readable — under the default
+    transaction-per-test every request runs inside an atomic block, in_atomic_block
+    would be true whatever the duplication does, and the test would hold for a
+    duplication that seeds its content without ever committing first.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    document = factories.DocumentFactory(users=[(user, "owner")], title="my document")
+
+    in_atomic_block = []
+
+    def create_ydoc(_duplicated_document, _update):
+        in_atomic_block.append(connection.in_atomic_block)
+
+    mock_yhub.return_value.create_ydoc.side_effect = create_ydoc
+
+    response = client.post(f"/api/v1.0/documents/{document.id!s}/duplicate/")
+
+    assert response.status_code == 201
+    assert in_atomic_block == [False]
+
+
+def test_api_documents_duplicate_partial_failure_is_compensated(mock_yhub):
+    """
+    A failure seeding the content of a subtree must undo the whole
+    duplication: what was already seeded on the collaboration server is
+    deleted, and the replicated documents are removed from the database, so
+    neither side is left with an orphan.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    root = factories.DocumentFactory(users=[(user, "owner")], title="Root")
+    factories.DocumentFactory(parent=root, title="Child 1")
+    factories.DocumentFactory(parent=root, title="Child 2")
+
+    seeded = []
+
+    def create_ydoc(duplicated_document, _update):
+        seeded.append(duplicated_document)
+        if len(seeded) == 3:
+            raise YHubServiceUnavailableError("Failed to connect to the yhub service")
+
+    mock_yhub.return_value.create_ydoc.side_effect = create_ydoc
+
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 500
+    # the whole replicated subtree is gone, only the original remains
+    assert models.Document.objects.count() == 3
+    # what was seeded before the failure is compensated, in seeding order
+    assert mock_yhub.return_value.delete_ydoc.call_args_list == [
+        mock.call(seeded[0]),
+        mock.call(seeded[1]),
+        mock.call(seeded[2]),
+    ]
+    mock_capture.assert_not_called()
+
+
+def test_api_documents_duplicate_content_conflict_is_compensated(mock_yhub):
+    """
+    A 409 on `create_ydoc` — the collaboration server already holds content
+    for the duplicate — is a duplication failure like any other: it is a
+    state a fresh duplicate id cannot reach, it says nothing about holding
+    the source's content, and a 201 served on top of unknown content would
+    be a lie. The duplication is undone and the failure is reported.
+    """
+    user = factories.UserFactory()
+    client = APIClient()
+    client.force_login(user)
+
+    root = factories.DocumentFactory(users=[(user, "owner")], title="Root")
+    factories.DocumentFactory(parent=root, title="Child 1")
+    factories.DocumentFactory(parent=root, title="Child 2")
+
+    seeded = []
+
+    def create_ydoc(duplicated_document, _update):
+        seeded.append(duplicated_document)
+        if len(seeded) == 2:
+            raise APIError("The yhub API answered 409 on create-ydoc", status_code=409)
+
+    mock_yhub.return_value.create_ydoc.side_effect = create_ydoc
+
+    with mock.patch("core.api.viewsets.posthog_capture") as mock_capture:
+        response = client.post(
+            f"/api/v1.0/documents/{root.id!s}/duplicate/",
+            {"with_descendants": True},
+            format="json",
+        )
+
+    assert response.status_code == 500
+    assert models.Document.objects.count() == 3
+    # the one document that 409'd is compensated along with the seeded one
+    assert mock_yhub.return_value.delete_ydoc.call_args_list == [
+        mock.call(seeded[0]),
+        mock.call(seeded[1]),
+    ]
+    mock_capture.assert_not_called()

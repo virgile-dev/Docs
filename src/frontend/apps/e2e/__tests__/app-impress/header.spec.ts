@@ -1,103 +1,64 @@
 import { expect, test } from '@playwright/test';
 
-import { keyCloakSignIn } from './common';
-
 test.describe('Header', () => {
-  test.beforeEach(async ({ page }) => {
+  test('it displays skip link on first TAB and focuses page heading on click', async ({
+    page,
+  }) => {
     await page.goto('/');
+
+    // Wait for skip link to be mounted (client-side only component)
+    const skipLink = page.getByRole('link', { name: 'Go to content' });
+    await skipLink.waitFor({ state: 'attached' });
+
+    // First TAB shows the skip link
+    await page.keyboard.press('Tab');
+
+    // The skip link should be visible and focused
+    await expect(skipLink).toBeFocused();
+    await expect(skipLink).toBeVisible();
+    // Clicking moves focus to the page heading
+    await skipLink.click();
+    const pageHeading = page.getByRole('heading', {
+      name: 'Recent',
+      level: 2,
+    });
+    await expect(pageHeading).toBeFocused();
   });
 
-  test('checks all the elements are visible', async ({ page }) => {
+  test('checks elements visibility on different screen sizes', async ({
+    page,
+  }) => {
+    // Desktop viewport
+    await page.goto('/');
+
     const header = page.locator('header').first();
 
-    await expect(header.getByAltText('Docs Logo')).toBeVisible();
-    await expect(header.locator('h2').getByText('Docs')).toHaveCSS(
-      'color',
-      'rgb(0, 0, 145)',
-    );
-    await expect(header.locator('h2').getByText('Docs')).toHaveCSS(
-      'font-family',
-      /Marianne/i,
-    );
+    await expect(header.getByLabel('Toggle left panel')).toBeHidden();
+    await expect(header.getByLabel('Docs animated icon')).toBeHidden();
+    await expect(header.getByLabel('Search docs')).toBeHidden();
 
-    await expect(
-      header.getByRole('button', {
-        name: 'Logout',
-      }),
-    ).toBeVisible();
+    // Tablet viewport
+    await page.setViewportSize({ width: 900, height: 1200 });
+    await expect(header.getByLabel('Toggle left panel')).toBeVisible();
+    await expect(header.getByLabel('Docs animated icon')).toBeHidden();
+    await expect(header.getByLabel('Search docs')).toBeHidden();
 
-    await expect(header.getByText('English')).toBeVisible();
+    await header.getByLabel('Toggle left panel').click();
+    await expect(header.getByLabel('Toggle left panel')).toBeVisible();
+    await expect(header.getByLabel('Docs animated icon')).toBeInViewport();
+    await expect(header.getByLabel('Search docs')).toBeVisible();
 
-    await expect(
-      header.getByRole('button', {
-        name: 'Les services de La Suite numérique',
-      }),
-    ).toBeVisible();
-  });
+    // scrollDown
+    await page.mouse.wheel(0, 1000);
 
-  test('checks La Gauffre interaction', async ({ page }) => {
-    const header = page.locator('header').first();
+    await expect(header.getByLabel('Toggle left panel')).toBeVisible();
+    await expect(header.getByLabel('Docs animated icon')).not.toBeInViewport();
+    await expect(header.getByLabel('Search docs')).toBeVisible();
 
-    await expect(
-      header.getByRole('button', {
-        name: 'Les services de La Suite numérique',
-      }),
-    ).toBeVisible();
-
-    /**
-     * La gaufre load a js file from a remote server,
-     * it takes some time to load the file and have the interaction available
-     */
-    // eslint-disable-next-line playwright/no-wait-for-timeout
-    await page.waitForTimeout(1500);
-
-    await header
-      .getByRole('button', {
-        name: 'Les services de La Suite numérique',
-      })
-      .click();
-
-    await expect(
-      page.getByRole('link', { name: 'France Transfert' }),
-    ).toBeVisible();
-
-    await expect(page.getByRole('link', { name: 'Grist' })).toBeVisible();
-  });
-});
-
-test.describe('Header mobile', () => {
-  test.use({ viewport: { width: 500, height: 1200 } });
-
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-  });
-
-  test('it checks the header when mobile', async ({ page }) => {
-    const header = page.locator('header').first();
-
-    await expect(header.getByLabel('Open the header menu')).toBeVisible();
-    await expect(header.getByRole('link', { name: 'Docs Logo' })).toBeVisible();
-    await expect(
-      header.getByRole('button', {
-        name: 'Les services de La Suite numérique',
-      }),
-    ).toBeVisible();
-  });
-});
-
-test.describe('Header: Log out', () => {
-  test.use({ storageState: { cookies: [], origins: [] } });
-
-  test('checks logout button', async ({ page, browserName }) => {
-    await page.goto('/');
-    await keyCloakSignIn(page, browserName);
-
-    await page
-      .getByRole('button', {
-        name: 'Logout',
-      })
-      .click();
-
-    await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+    // Mobile viewport
+    await page.setViewportSize({ width: 500, height: 1200 });
+    await expect(header.getByLabel('Toggle left panel')).toBeVisible();
+    await expect(header.getByLabel('Docs animated icon')).toBeVisible();
+    await expect(header.getByLabel('Search docs')).toBeVisible();
   });
 });

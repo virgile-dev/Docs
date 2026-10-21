@@ -1,43 +1,51 @@
+import clsx from 'clsx';
+import React from 'react';
 import { css } from 'styled-components';
 
 import { Text, TextType } from '@/components';
-import { useCunninghamTheme } from '@/cunningham';
 
-type IconProps = TextType & {
-  iconName: string;
-};
-export const Icon = ({ iconName, ...textProps }: IconProps) => {
-  return (
-    <Text $isMaterialIcon {...textProps}>
-      {iconName}
-    </Text>
-  );
+type IconBase = TextType & {
+  disabled?: boolean;
 };
 
-interface IconBGProps extends TextType {
+type IconMaterialProps = IconBase & {
   iconName: string;
-}
+  variant?: 'filled' | 'outlined' | 'symbols-outlined';
+  icon?: never;
+};
 
-export const IconBG = ({ iconName, ...textProps }: IconBGProps) => {
-  const { colorsTokens } = useCunninghamTheme();
+type IconSVGProps = IconBase & {
+  icon: React.ReactNode;
+  iconName?: never;
+  variant?: never;
+};
+
+export const Icon = ({
+  className,
+  disabled,
+  iconName,
+  icon,
+  variant = 'outlined',
+  $theme = 'neutral',
+  ...textProps
+}: IconMaterialProps | IconSVGProps) => {
+  const hasLabel = 'aria-label' in textProps || 'aria-labelledby' in textProps;
+  const ariaHidden =
+    'aria-hidden' in textProps ? textProps['aria-hidden'] : !hasLabel;
 
   return (
     <Text
-      $isMaterialIcon
-      $size="36px"
-      $theme="primary"
-      $variation="600"
-      $background={colorsTokens()['primary-bg']}
-      $css={`
-        border: 1px solid ${colorsTokens()['primary-200']}; 
-        user-select: none;
-      `}
-      $radius="12px"
-      $padding="4px"
-      $margin="auto"
+      aria-hidden={ariaHidden}
+      className={clsx('--docs--icon-bg', className, {
+        'material-icons-filled': variant === 'filled' && iconName,
+        'material-icons': variant === 'outlined' && iconName,
+        'material-symbols-outlined': variant === 'symbols-outlined' && iconName,
+      })}
+      $theme={disabled ? 'disabled' : $theme}
+      aria-disabled={disabled}
       {...textProps}
     >
-      {iconName}
+      {iconName ?? icon}
     </Text>
   );
 };
@@ -46,17 +54,19 @@ type IconOptionsProps = TextType & {
   isHorizontal?: boolean;
 };
 
-export const IconOptions = ({ isHorizontal, ...props }: IconOptionsProps) => {
+export const IconOptions = ({
+  isHorizontal,
+  $css,
+  ...props
+}: IconOptionsProps) => {
   return (
-    <Text
-      {...props}
-      $isMaterialIcon
+    <Icon
+      iconName={isHorizontal ? 'more_horiz' : 'more_vert'}
       $css={css`
         user-select: none;
-        ${props.$css}
+        ${$css}
       `}
-    >
-      {isHorizontal ? 'more_horiz' : 'more_vert'}
-    </Text>
+      {...props}
+    />
   );
 };

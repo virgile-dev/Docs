@@ -1,10 +1,17 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import {
+  UseMutationOptions,
+  useMutation,
+  useQueryClient,
+} from '@tanstack/react-query';
 
 import { APIError, errorCauses, fetchAPI } from '@/api';
-import { Doc } from '@/features/docs';
 
-export type UpdateDocParams = Pick<Doc, 'id'> &
-  Partial<Pick<Doc, 'content' | 'title'>>;
+import { Doc } from '../types';
+
+export interface UpdateDocParams {
+  id: Doc['id'];
+  title?: string;
+}
 
 export const updateDoc = async ({
   id,
@@ -24,25 +31,30 @@ export const updateDoc = async ({
   return response.json() as Promise<Doc>;
 };
 
-interface UpdateDocProps {
-  onSuccess?: (data: Doc) => void;
-  listInvalideQueries?: string[];
-}
+type UseUpdateDoc = UseMutationOptions<Doc, APIError, UpdateDocParams> & {
+  listInvalidQueries?: string[];
+};
 
-export function useUpdateDoc({
-  onSuccess,
-  listInvalideQueries,
-}: UpdateDocProps = {}) {
+export function useUpdateDoc(queryConfig?: UseUpdateDoc) {
   const queryClient = useQueryClient();
   return useMutation<Doc, APIError, UpdateDocParams>({
     mutationFn: updateDoc,
-    onSuccess: (data) => {
-      listInvalideQueries?.forEach((queryKey) => {
-        void queryClient.invalidateQueries({
+    ...queryConfig,
+    onSuccess: (data, variables, onMutateResult, context) => {
+      queryConfig?.listInvalidQueries?.forEach((queryKey) => {
+        void queryClient.resetQueries({
           queryKey: [queryKey],
         });
       });
-      onSuccess?.(data);
+
+      if (queryConfig?.onSuccess) {
+        void queryConfig.onSuccess(data, variables, onMutateResult, context);
+      }
+    },
+    onError: (error, variables, onMutateResult, context) => {
+      if (queryConfig?.onError) {
+        queryConfig.onError(error, variables, onMutateResult, context);
+      }
     },
   });
 }

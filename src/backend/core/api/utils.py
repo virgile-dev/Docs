@@ -6,9 +6,65 @@ from abc import ABC, abstractmethod
 from django.conf import settings
 from django.core.cache import cache
 from django.core.files.storage import default_storage
+from django.utils.decorators import method_decorator
 
 import botocore
+from lasuite.oidc_login.decorators import refresh_oidc_access_token
 from rest_framework.throttling import BaseThrottle
+
+from core.utils.s3 import get_s3_client, get_unsigned_s3_client
+
+
+def nest_tree(flat_list, steplen):
+    """
+    Convert a flat list of serialized documents into a nested tree making advantage
+    of the`path` field and its step length.
+    """
+    node_dict = {}
+    roots = []
+
+    # Sort the flat list by path to ensure parent nodes are processed first
+    flat_list.sort(key=lambda x: x["path"])
+
+    for node in flat_list:
+        node["children"] = []  # Initialize children list
+        node_dict[node["path"]] = node
+
+        # Determine parent path
+        parent_path = node["path"][:-steplen]
+
+        if parent_path in node_dict:
+            node_dict[parent_path]["children"].append(node)
+        else:
+            roots.append(node)  # Collect root nodes
+
+    if len(roots) > 1:
+        raise ValueError("More than one root element detected.")
+
+    return roots[0] if roots else None
+
+
+def filter_root_paths(paths, skip_sorting=False):
+    """
+    Filters root paths from a list of paths representing a tree structure.
+    A root path is defined as a path that is not a prefix of any other path.
+
+    Args:
+        paths (list of str): The list of paths.
+
+    Returns:
+        list of str: The filtered list of root paths.
+    """
+    if not skip_sorting:
+        paths.sort()
+
+    root_paths = []
+    for path in paths:
+        # If the current path is not a prefix of the last added root path, add it
+        if not root_paths or not path.startswith(root_paths[-1]):
+            root_paths.append(path)
+
+    return root_paths
 
 
 def generate_s3_authorization_headers(key):
@@ -21,14 +77,14 @@ def generate_s3_authorization_headers(key):
     - access control is truly realtime
     - the object storage service does not need to be exposed on internet
     """
-    url = default_storage.unsigned_connection.meta.client.generate_presigned_url(
+    url = get_unsigned_s3_client().generate_presigned_url(
         "get_object",
         ExpiresIn=0,
         Params={"Bucket": default_storage.bucket_name, "Key": key},
     )
     request = botocore.awsrequest.AWSRequest(method="get", url=url)
 
-    s3_client = default_storage.connection.meta.client
+    s3_client = get_s3_client()
     # pylint: disable=protected-access
     credentials = s3_client._request_signer._credentials  # noqa: SLF001
     frozen_credentials = credentials.get_frozen_credentials()
@@ -37,6 +93,19 @@ def generate_s3_authorization_headers(key):
     auth.add_auth(request)
 
     return request
+
+
+def conditional_refresh_oidc_token(func):
+    """
+    Conditionally apply refresh_oidc_access_token decorator.
+
+    The decorator is only applied if OIDC_STORE_REFRESH_TOKEN is True, meaning
+    we can actually refresh something. Broader settings checks are done in settings.py.
+    """
+    if settings.OIDC_STORE_REFRESH_TOKEN:
+        return method_decorator(refresh_oidc_access_token)(func)
+
+    return func
 
 
 class AIBaseRateThrottle(BaseThrottle, ABC):

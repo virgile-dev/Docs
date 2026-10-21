@@ -1,76 +1,76 @@
-import { Loader } from '@openfun/cunningham-react';
-import { useRouter } from 'next/router';
-import { useEffect, useState } from 'react';
+import clsx from 'clsx';
+import { PropsWithChildren, useEffect, useState } from 'react';
 import { css } from 'styled-components';
-import * as Y from 'yjs';
 
-import { Box, Text, TextErrors } from '@/components';
-import { useCunninghamTheme } from '@/cunningham';
-import { DocHeader, DocVersionHeader } from '@/features/docs/doc-header/';
+import { Box } from '@/components';
+import { DocHeader } from '@/docs/doc-header/';
 import {
   Doc,
-  base64ToBlocknoteXmlFragment,
+  LinkReach,
+  getDocLinkReach,
   useProviderStore,
-} from '@/features/docs/doc-management';
-import { TableContent } from '@/features/docs/doc-table-content/';
-import { Versions, useDocVersion } from '@/features/docs/doc-versioning/';
+} from '@/docs/doc-management';
+import { useAuth } from '@/features/auth/';
+import { SkeletonEditorCore, useSkeletonStore } from '@/features/skeletons';
+import { useSkeletonFadeOut } from '@/features/skeletons/hooks/useFadeOut';
+import { useAnalytics } from '@/libs';
 import { useResponsiveStore } from '@/stores';
 
-import { BlockNoteEditor, BlockNoteEditorVersion } from './BlockNoteEditor';
+import { useCollaboration } from '../hook/useCollaboration';
 
-interface DocEditorProps {
-  doc: Doc;
-  versionId?: Versions['version_id'];
+import { BlockNoteEditor, BlockNoteReader } from './BlockNoteEditor';
+
+const DOCS_EDITOR_CLASS = '--docs--doc-editor';
+
+interface DocEditorContainerProps {
+  docHeader: React.ReactNode;
+  isDeletedDoc: boolean;
+  readOnly: boolean;
 }
 
-export const DocEditor = ({ doc, versionId }: DocEditorProps) => {
+export const DocEditorContainer = ({
+  children,
+  docHeader,
+  isDeletedDoc,
+  readOnly,
+}: PropsWithChildren<DocEditorContainerProps>) => {
   const { isDesktop } = useResponsiveStore();
-
-  const isVersion = !!versionId && typeof versionId === 'string';
-
-  const { colorsTokens } = useCunninghamTheme();
-
-  const { provider } = useProviderStore();
-
-  if (!provider) {
-    return null;
-  }
 
   return (
     <>
-      {isDesktop && !isVersion && (
+      <Box
+        $maxWidth="868px"
+        $width="100%"
+        $flex="1"
+        className={DOCS_EDITOR_CLASS}
+        $margin={{ horizontal: 'auto' }}
+      >
         <Box
-          $position="absolute"
-          $css={css`
-            top: 72px;
-            right: 20px;
-          `}
+          $padding={{ horizontal: isDesktop ? '54px' : 'base' }}
+          className="--docs--doc-editor-header"
         >
-          <TableContent />
-        </Box>
-      )}
-      <Box $maxWidth="868px" $width="100%" $height="100%">
-        <Box $padding={{ horizontal: isDesktop ? '54px' : 'base' }}>
-          {isVersion ? (
-            <DocVersionHeader title={doc.title} />
-          ) : (
-            <DocHeader doc={doc} />
-          )}
+          {docHeader}
         </Box>
 
         <Box
-          $background={colorsTokens()['primary-bg']}
           $direction="row"
           $width="100%"
-          $css="overflow-x: clip; flex: 1;"
+          $css="flex: 1;"
           $position="relative"
+          className="--docs--doc-editor-content"
         >
-          <Box $css="flex:1;" $overflow="auto" $position="relative">
-            {isVersion ? (
-              <DocVersionEditor docId={doc.id} versionId={versionId} />
-            ) : (
-              <BlockNoteEditor doc={doc} provider={provider} />
-            )}
+          <Box $css="flex:1;" $position="relative" $width="100%">
+            <Box
+              $padding={{ top: 'md', bottom: '2rem' }}
+              $background="var(--c--contextuals--background--surface--primary)"
+              className={clsx('--docs--editor-container', {
+                '--docs--doc-readonly': readOnly,
+                '--docs--doc-deleted': isDeletedDoc,
+              })}
+              $height="100%"
+            >
+              {children}
+            </Box>
           </Box>
         </Box>
       </Box>
@@ -78,65 +78,91 @@ export const DocEditor = ({ doc, versionId }: DocEditorProps) => {
   );
 };
 
-interface DocVersionEditorProps {
-  docId: Doc['id'];
-  versionId: Versions['version_id'];
+interface DocEditorProps {
+  doc: Doc;
 }
 
-export const DocVersionEditor = ({
-  docId,
-  versionId,
-}: DocVersionEditorProps) => {
-  const {
-    data: version,
-    isLoading,
-    isError,
-    error,
-  } = useDocVersion({
-    docId,
-    versionId,
-  });
-
-  const { replace } = useRouter();
-  const [initialContent, setInitialContent] = useState<Y.XmlFragment>();
+export const DocEditor = ({ doc }: DocEditorProps) => {
+  const isDeletedDoc = !!doc.deleted_at;
+  const readOnly = !doc.abilities.partial_update || isDeletedDoc;
+  // the collaboration providers are built from this too: a reader publishes no
+  // presence, on either transport
+  useCollaboration(doc.id, readOnly);
+  const { trackEvent } = useAnalytics();
+  const [hasTracked, setHasTracked] = useState(false);
+  const { authenticated } = useAuth();
+  const isPublicDoc = getDocLinkReach(doc) === LinkReach.PUBLIC;
+  const { setIsSkeletonVisible } = useSkeletonStore();
 
   useEffect(() => {
-    if (!version?.content) {
+    setIsSkeletonVisible(false);
+  }, [setIsSkeletonVisible, doc.id]);
+
+  /**
+   * Track doc view event only once per doc change
+   */
+  useEffect(() => {
+    setHasTracked(false);
+  }, [doc.id]);
+
+  /**
+   * Track doc view event
+   */
+  useEffect(() => {
+    if (hasTracked) {
       return;
     }
 
-    setInitialContent(base64ToBlocknoteXmlFragment(version.content));
-  }, [version?.content]);
+    setHasTracked(true);
 
-  if (isError && error) {
-    if (error.status === 404) {
-      void replace(`/404`);
-      return null;
-    }
+    trackEvent({
+      eventName: 'doc',
+      isPublic: isPublicDoc,
+      authenticated,
+    });
+  }, [authenticated, hasTracked, isPublicDoc, trackEvent]);
 
+  return (
+    <DocEditorContainer
+      docHeader={<DocHeader doc={doc} />}
+      isDeletedDoc={isDeletedDoc}
+      readOnly={readOnly}
+    >
+      <DocCoreEditor doc={doc} readOnly={readOnly} />
+    </DocEditorContainer>
+  );
+};
+
+interface DocCoreEditorProps {
+  doc: Doc;
+  readOnly: boolean;
+}
+
+export const DocCoreEditor = ({ doc, readOnly }: DocCoreEditorProps) => {
+  const { provider, isReady } = useProviderStore();
+  const isProviderReady = isReady && provider;
+  const showContent = !!(isProviderReady && provider?.roomname === doc.id);
+  const { skeletonVisible, isFadingOut } = useSkeletonFadeOut(showContent);
+
+  if (skeletonVisible || !isProviderReady || provider?.roomname !== doc.id) {
     return (
-      <Box $margin="large">
-        <TextErrors
-          causes={error.cause}
-          icon={
-            error.status === 502 ? (
-              <Text className="material-icons" $theme="danger">
-                wifi_off
-              </Text>
-            ) : undefined
-          }
-        />
-      </Box>
+      <SkeletonEditorCore
+        isFadingOut={isFadingOut}
+        $css={css`
+          padding-top: 0px;
+        `}
+      />
     );
   }
 
-  if (isLoading || !version || !initialContent) {
+  if (readOnly) {
     return (
-      <Box $align="center" $justify="center" $height="100%">
-        <Loader />
-      </Box>
+      <BlockNoteReader
+        initialContent={provider.doc.getXmlFragment('document-store')}
+        docId={doc.id}
+      />
     );
   }
 
-  return <BlockNoteEditorVersion initialContent={initialContent} />;
+  return <BlockNoteEditor doc={doc} provider={provider} />;
 };

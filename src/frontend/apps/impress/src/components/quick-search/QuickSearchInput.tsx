@@ -1,33 +1,31 @@
-import { Loader } from '@openfun/cunningham-react';
 import { Command } from 'cmdk';
-import { ReactNode } from 'react';
+import { PropsWithChildren, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import SearchSVG from '@/assets/icons/ui-kit/zoom-rounded.svg';
 import { HorizontalSeparator } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
 
 import { Box } from '../Box';
-import { Icon } from '../Icon';
 
-type Props = {
-  loading?: boolean;
+type QuickSearchInputProps = {
   inputValue?: string;
   onFilter?: (str: string) => void;
   placeholder?: string;
-  children?: ReactNode;
   withSeparator?: boolean;
+  listId?: string;
 };
 export const QuickSearchInput = ({
-  loading,
   inputValue,
   onFilter,
   placeholder,
   children,
   withSeparator: separator = true,
-}: Props) => {
+  listId,
+}: PropsWithChildren<QuickSearchInputProps>) => {
   const { t } = useTranslation();
   const { spacingsTokens } = useCunninghamTheme();
-  const spacing = spacingsTokens();
+  const inputRef = useRef<HTMLInputElement>(null);
 
   if (children) {
     return (
@@ -44,26 +42,30 @@ export const QuickSearchInput = ({
         $direction="row"
         $align="center"
         className="quick-search-input"
-        $gap={spacing['2xs']}
-        $padding={{ all: 'base' }}
+        $gap={spacingsTokens['xxs']}
+        $padding={{ horizontal: 'base', vertical: 'xs' }}
       >
-        {!loading && <Icon iconName="search" $variation="600" />}
-        {loading && (
-          <div>
-            <Loader size="small" />
-          </div>
-        )}
+        <SearchSVG
+          aria-hidden="true"
+          width={24}
+          height={24}
+          color="var(--c--contextuals--content--semantic--neutral--secondary)"
+        />
         <Command.Input
-          /* eslint-disable-next-line jsx-a11y/no-autofocus */
+          ref={inputRef}
           autoFocus={true}
-          aria-label={t('Quick search input')}
+          aria-controls={listId}
           value={inputValue}
-          role="combobox"
-          placeholder={placeholder ?? t('Search')}
+          placeholder={
+            placeholder ??
+            t('Search', { description: 'Placeholder of a search input' })
+          }
           onValueChange={onFilter}
+          maxLength={254}
+          data-testid="quick-search-input"
         />
       </Box>
-      {separator && <HorizontalSeparator $withPadding={false} />}
+      {separator && <HorizontalSeparator $margin={{ top: '2xs' }} />}
     </>
   );
 };

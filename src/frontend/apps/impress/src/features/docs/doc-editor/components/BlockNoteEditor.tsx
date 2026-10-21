@@ -1,171 +1,346 @@
-import { Dictionary, locales } from '@blocknote/core';
+import { syntaxHighlighter } from '@blocknote/code-block';
+import {
+  BlockNoteSchema,
+  defaultBlockSpecs,
+  defaultInlineContentSpecs,
+  withPageBreak,
+} from '@blocknote/core';
+import { CommentsExtension } from '@blocknote/core/comments';
 import '@blocknote/core/fonts/inter.css';
+import * as localesBN from '@blocknote/core/locales';
+import { withCollaboration } from '@blocknote/core/yjs';
+import {
+  createReactDiagramBlockSpec,
+  locales as diagramLocales,
+} from '@blocknote/diagram-block';
 import { BlockNoteView } from '@blocknote/mantine';
 import '@blocknote/mantine/style.css';
-import { useCreateBlockNote } from '@blocknote/react';
-import { HocuspocusProvider } from '@hocuspocus/provider';
-import { useEffect } from 'react';
+import {
+  createReactInlineMathSpec,
+  createReactMathBlockSpec,
+  locales as mathLocales,
+} from '@blocknote/math-block';
+import {
+  FloatingComposerController,
+  FloatingThreadController,
+  ReactAudioBlock,
+  ReactFileBlock,
+  ReactImageBlock,
+  ReactVideoBlock,
+  ThreadsSidebar,
+  useCreateBlockNote,
+} from '@blocknote/react';
+import { FindAndReplace } from '@tiptap/extension-find-and-replace';
+import { useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import { WebsocketProvider } from 'y-websocket';
 import * as Y from 'yjs';
 
-import { Box, TextErrors } from '@/components';
-import { useAuthStore } from '@/core/auth';
-import { Doc } from '@/features/docs/doc-management';
+import { Box } from '@/components';
+import { useConfig } from '@/core';
+import { useCunninghamTheme } from '@/cunningham';
+import {
+  DocsCommentsStyle,
+  useCommentSidebarStore,
+  useComments,
+} from '@/docs/doc-comments';
+import { DocsFindReplaceStyle } from '@/docs/doc-find-replace/styles';
+import { type Doc } from '@/docs/doc-management/types';
+import { avatarUrlFromName, useAuth } from '@/features/auth';
+import { useRightPanelStore } from '@/features/right-panel/stores/useRightPanelStore';
+import { useAnalytics } from '@/libs/Analytics';
 
-import { useUploadFile } from '../hook';
-import { useHeadings } from '../hook/useHeadings';
-import useSaveDoc from '../hook/useSaveDoc';
+import { AI_FEATURE_FLAG, DEFAULT_LOCALE } from '../conf';
+import {
+  useHeadings,
+  useScrollToBlockAnchor,
+  useShortcuts,
+  useUploadFile,
+  useUploadStatus,
+} from '../hook';
 import { useEditorStore } from '../stores';
-import { randomColor } from '../utils';
+import { DocsEditorStyle } from '../styles';
+import { type DocsBlockNoteEditor } from '../types';
+import { randomColor, sanitizeColor } from '../utils';
 
-import { BlockNoteToolbar } from './BlockNoteToolbar';
+import BlockNoteAI from './AI';
+import { BlockNoteSuggestionMenu } from './BlockNoteSuggestionMenu';
+import { BlockNoteToolbar } from './BlockNoteToolBar/BlockNoteToolbar';
+import { DocsSideMenu } from './DocsSideMenu/DocsSideMenu';
+import { CalloutBlock, PdfBlock, UploadLoaderBlock } from './custom-blocks';
+const AIMenu = BlockNoteAI?.AIMenu;
+const AIMenuController = BlockNoteAI?.AIMenuController;
+const useAI = BlockNoteAI?.useAI;
+const localesBNAI = BlockNoteAI?.localesAI || {};
+import { createSafeCodeBlockSpec } from './custom-blocks/CodeBlock';
+import {
+  InterlinkingLinkInlineContent,
+  getPastedDocInterlink,
+} from './custom-inline-content';
+import XLMultiColumn from './xl-multi-column';
 
-const cssEditor = (readonly: boolean) => `
-  &, & > .bn-container, & .ProseMirror {
-    height:100%;
-    
-      .bn-side-menu[data-block-type=heading][data-level="1"] { 
-         height: 50px; 
-     } 
-     .bn-side-menu[data-block-type=heading][data-level="2"] { 
-       height: 43px; 
-     } 
-    .bn-side-menu[data-block-type=heading][data-level="3"] {
-      height: 35px;
-    }
-    h1 {
-      font-size: 1.875rem;
-    }
-    h2 {
-      font-size: 1.5rem;
-    }
-    h3 {
-      font-size: 1.25rem;
-    }
-    a {
-      color: var(--c--theme--colors--greyscale-500);
-      cursor: pointer;
-    }
-    .bn-block-group
-      .bn-block-group
-      .bn-block-outer:not([data-prev-depth-changed]):before {
-      border-left: none;
-    }
-  }
-  
-  .bn-editor {
-    
-    color: var(--c--theme--colors--greyscale-700);
-  }
-  .bn-block-outer:not(:first-child) {
-    &:has(h1) {
-      padding-top: 32px;
-    }
-    &:has(h2) {
-      padding-top: 24px;
-    }
-    &:has(h3) {
-      padding-top: 16px;
-    }
-  };
-  
-  & .bn-inline-content code {
-    background-color: gainsboro;
-    padding: 2px;
-    border-radius: 4px;
-  }
-  @media screen and (width <= 560px) {
-    & .bn-editor {
-      
-      ${readonly && `padding-left: 10px;`}
-    };
-    .bn-side-menu[data-block-type=heading][data-level="1"] {
-        height: 46px;
-    }
-    .bn-side-menu[data-block-type=heading][data-level="2"] {
-      height: 40px;
-    }
-    .bn-side-menu[data-block-type=heading][data-level="3"] {
-      height: 40px;
-    }
-    & .bn-editor h1 {
-      font-size: 1.6rem;
-    }
-    & .bn-editor h2 {
-      font-size: 1.35rem;
-    }
-    & .bn-editor h3 {
-      font-size: 1.2rem;
-    }
-    .bn-block-content[data-is-empty-and-focused][data-content-type="paragraph"] 
-      .bn-inline-content:has(> .ProseMirror-trailingBreak:only-child)::before {
-      font-size: 14px;
-    }
-  }
-`;
+const localesBNMultiColumn = XLMultiColumn?.locales;
+const withMultiColumn = XLMultiColumn?.withMultiColumn;
+
+const baseBlockNoteSchema = withPageBreak(
+  BlockNoteSchema.create({
+    blockSpecs: {
+      ...defaultBlockSpecs,
+      audio: ReactAudioBlock(),
+      file: ReactFileBlock(),
+      image: ReactImageBlock(),
+      video: ReactVideoBlock(),
+      callout: CalloutBlock(),
+      codeBlock: createSafeCodeBlockSpec(),
+      diagram: createReactDiagramBlockSpec(),
+      mathBlock: createReactMathBlockSpec(),
+      pdf: PdfBlock(),
+      uploadLoader: UploadLoaderBlock(),
+    },
+    inlineContentSpecs: {
+      ...defaultInlineContentSpecs,
+      interlinkingLinkInline: InterlinkingLinkInlineContent,
+      math: createReactInlineMathSpec(),
+    },
+  }),
+);
+
+export const blockNoteSchema = (withMultiColumn?.(baseBlockNoteSchema) ||
+  baseBlockNoteSchema) as typeof baseBlockNoteSchema;
 
 interface BlockNoteEditorProps {
   doc: Doc;
-  provider: HocuspocusProvider;
+  provider: WebsocketProvider;
 }
 
 export const BlockNoteEditor = ({ doc, provider }: BlockNoteEditorProps) => {
-  const { userData } = useAuthStore();
+  const { user } = useAuth();
   const { setEditor } = useEditorStore();
-  const { t } = useTranslation();
+  const { themeTokens } = useCunninghamTheme();
+  const refEditorContainer = useRef<HTMLDivElement>(null);
 
-  const readOnly = !doc.abilities.partial_update;
-  useSaveDoc(doc.id, provider.document, !readOnly);
-  const { i18n } = useTranslation();
-  const lang = i18n.language;
+  const { i18n, t } = useTranslation();
+  const langLocalesBN =
+    !i18n.resolvedLanguage || !(i18n.resolvedLanguage in localesBN)
+      ? DEFAULT_LOCALE
+      : i18n.resolvedLanguage;
+  const langLocalesBNMultiColumn =
+    !i18n.resolvedLanguage ||
+    !localesBNMultiColumn ||
+    !(i18n.resolvedLanguage in localesBNMultiColumn)
+      ? DEFAULT_LOCALE
+      : i18n.resolvedLanguage;
+  const langLocalesBNAI =
+    !i18n.resolvedLanguage || !(i18n.resolvedLanguage in localesBNAI)
+      ? DEFAULT_LOCALE
+      : i18n.resolvedLanguage;
+  // The math and diagram blocks ship the same set of locales.
+  const langLocalesBNMathDiagram =
+    !i18n.resolvedLanguage || !(i18n.resolvedLanguage in mathLocales)
+      ? DEFAULT_LOCALE
+      : i18n.resolvedLanguage;
 
-  const { uploadFile, errorAttachment } = useUploadFile(doc.id);
+  const { uploadFile } = useUploadFile(doc.id);
+  const conf = useConfig().data;
+  const { isFeatureFlagActivated } = useAnalytics();
+  const aiBlockNoteAllowed = !!(
+    conf?.AI_FEATURE_ENABLED &&
+    conf?.AI_FEATURE_BLOCKNOTE_ENABLED &&
+    isFeatureFlagActivated(AI_FEATURE_FLAG) &&
+    doc.abilities?.ai_proxy
+  );
+  const aiExtension = useAI?.(doc.id, aiBlockNoteAllowed);
 
-  const collabName = readOnly
-    ? 'Reader'
-    : userData?.full_name || userData?.email || t('Anonymous');
+  const collabName = user?.full_name || user?.email;
+  const cursorName =
+    collabName ||
+    t('Anonymous', {
+      description: 'Display name of a user without a known name',
+    });
+  const showCursorLabels: 'always' | 'activity' | (string & {}) = 'activity';
 
-  const editor = useCreateBlockNote(
-    {
+  // Comments
+  const canSeeComment = doc.abilities.comment;
+  const showComments = canSeeComment; // Determine if comments should be visible in the UI
+  const { resolveUsers, threadStore } = useComments(
+    doc.id,
+    canSeeComment,
+    user,
+  );
+
+  // Comment sidebar
+  const { threadsSidebarTarget, filter: threadsSidebarFilter } =
+    useCommentSidebarStore();
+  const { activePanel, isPanelOpen } = useRightPanelStore();
+  const isCommentSideBarOpen = isPanelOpen && activePanel === 'comments';
+
+  const currentUserAvatarUrl = useMemo(() => {
+    if (canSeeComment) {
+      return avatarUrlFromName(collabName, themeTokens?.font?.families?.base);
+    }
+  }, [canSeeComment, collabName, themeTokens?.font?.families?.base]);
+
+  const editor: DocsBlockNoteEditor = useCreateBlockNote(
+    withCollaboration({
       collaboration: {
         provider,
-        fragment: provider.document.getXmlFragment('document-store'),
+        fragment: provider.doc.getXmlFragment('document-store'),
         user: {
-          name: collabName,
+          name: cursorName,
           color: randomColor(),
         },
         /**
-         * We re-use the blocknote code to render the cursor but we:
-         * - fix rendering issue with Firefox
-         * - We don't want to show the cursor when anonymous users
+         * We render the cursor with a custom element to:
+         * - fix rendering issue with the default cursor
+         * - hide the cursor when anonymous users
          */
         renderCursor: (user: { color: string; name: string }) => {
-          const cursor = document.createElement('span');
+          const cursorElement = document.createElement('span');
+          const safeColor = sanitizeColor(user.color);
 
-          if (user.name === 'Reader') {
-            return cursor;
+          cursorElement.classList.add('collaboration-cursor-custom__base');
+          const caretElement = document.createElement('span');
+          caretElement.classList.add('collaboration-cursor-custom__caret');
+          caretElement.setAttribute('spellcheck', `false`);
+          caretElement.setAttribute('style', `background-color: ${safeColor}`);
+
+          if (showCursorLabels === 'always') {
+            cursorElement.setAttribute('data-active', '');
           }
 
-          cursor.classList.add('collaboration-cursor__caret');
-          cursor.setAttribute('style', `border-color: ${user.color}`);
+          const labelElement = document.createElement('span');
 
-          const label = document.createElement('span');
+          labelElement.classList.add('collaboration-cursor-custom__label');
+          labelElement.setAttribute('spellcheck', `false`);
+          labelElement.setAttribute(
+            'style',
+            `background-color: ${safeColor};border: 1px solid ${safeColor};`,
+          );
+          labelElement.insertBefore(document.createTextNode(user.name), null);
 
-          label.classList.add('collaboration-cursor__label');
-          label.setAttribute('style', `background-color: ${user.color}`);
-          label.insertBefore(document.createTextNode(user.name), null);
+          caretElement.insertBefore(labelElement, null);
 
-          cursor.insertBefore(label, null);
+          cursorElement.insertBefore(document.createTextNode('\u2060'), null); // Non-breaking space
+          cursorElement.insertBefore(caretElement, null);
+          cursorElement.insertBefore(document.createTextNode('\u2060'), null); // Non-breaking space
 
-          return cursor;
+          return cursorElement;
+        },
+        showCursorLabels: showCursorLabels as 'always' | 'activity',
+      },
+      dropCursor: {
+        color: 'var(--c--contextuals--background--semantic--brand--tertiary)',
+      },
+      dictionary: {
+        ...localesBN[langLocalesBN as keyof typeof localesBN],
+        math: mathLocales[langLocalesBNMathDiagram as keyof typeof mathLocales],
+        diagram:
+          diagramLocales[
+            langLocalesBNMathDiagram as keyof typeof diagramLocales
+          ],
+        ...(localesBNMultiColumn && {
+          multi_column:
+            localesBNMultiColumn[
+              langLocalesBNMultiColumn as keyof typeof localesBNMultiColumn
+            ],
+          ai: localesBNAI?.[langLocalesBNAI as keyof typeof localesBNAI],
+        }),
+      },
+      pasteHandler: ({ event, editor: pasteEditor, defaultPasteHandler }) => {
+        // Get clipboard data
+        const blocknoteData = event.clipboardData?.getData('blocknote/html');
+
+        /**
+         * When pasting comments, the data-bn-thread-id
+         * attribute is present in the clipboard data.
+         * This indicates that the pasted content contains comments.
+         * But if the content with comments comes from another document,
+         * it will create orphaned comments that are not linked to this document
+         * and create errors.
+         * To avoid this, we refresh the threads to ensure that only comments
+         * relevant to the current document are displayed.
+         */
+        if (blocknoteData && blocknoteData.includes('data-bn-thread-id')) {
+          void threadStore.refreshThreads();
+        }
+
+        /**
+         * When pasting a bare link to a doc on this same domain, turn it
+         * into an interlink instead of a plain link, so it benefits from
+         * the title-sync and navigation behaviour of the interlinking system.
+         */
+        const pastedInterlink = getPastedDocInterlink(
+          event,
+          pasteEditor as DocsBlockNoteEditor,
+        );
+        if (pastedInterlink?.docId) {
+          editor.insertInlineContent([
+            {
+              type: 'interlinkingLinkInline',
+              props: {
+                docId: pastedInterlink.docId,
+                ...(pastedInterlink.blockId && {
+                  blockId: pastedInterlink.blockId,
+                }),
+              },
+            },
+          ]);
+          return true;
+        }
+
+        return defaultPasteHandler();
+      },
+      extensions: [
+        // Highlights the source of code blocks and of the math / diagram
+        // blocks' editable LaTeX / Mermaid popups.
+        syntaxHighlighter,
+        CommentsExtension({ threadStore, resolveUsers }),
+        ...(aiExtension ? [aiExtension] : []),
+      ],
+      _tiptapOptions: {
+        extensions: [
+          FindAndReplace.configure({
+            injectCSS: false,
+          }),
+        ],
+      },
+      visualMedia: {
+        image: {
+          maxWidth: 760,
         },
       },
-      dictionary: locales[lang as keyof typeof locales] as Dictionary,
+      tables: {
+        splitCells: true,
+        cellBackgroundColor: true,
+        cellTextColor: true,
+        headers: true,
+      },
+      setIdAttribute: true,
       uploadFile,
-    },
-    [collabName, lang, provider, uploadFile],
+      schema: blockNoteSchema,
+    }),
+    [
+      aiExtension,
+      cursorName,
+      langLocalesBN,
+      langLocalesBNMultiColumn,
+      langLocalesBNAI,
+      langLocalesBNMathDiagram,
+      provider,
+      uploadFile,
+      threadStore,
+      resolveUsers,
+    ],
   );
+
   useHeadings(editor);
+
+  useShortcuts(editor, refEditorContainer.current);
+
+  useUploadStatus(editor);
+
+  useScrollToBlockAnchor();
 
   useEffect(() => {
     setEditor(editor);
@@ -176,40 +351,64 @@ export const BlockNoteEditor = ({ doc, provider }: BlockNoteEditorProps) => {
   }, [setEditor, editor]);
 
   return (
-    <Box $css={cssEditor(readOnly)}>
-      {errorAttachment && (
-        <Box $margin={{ bottom: 'big' }}>
-          <TextErrors
-            causes={errorAttachment.cause}
-            canClose
-            $textAlign="left"
-          />
-        </Box>
-      )}
-
+    <Box ref={refEditorContainer} $height="100%">
+      <DocsEditorStyle />
+      <DocsCommentsStyle
+        canSeeComment={canSeeComment}
+        currentUserAvatarUrl={currentUserAvatarUrl}
+      />
+      <DocsFindReplaceStyle />
       <BlockNoteView
+        className="--docs--main-editor"
         editor={editor}
         formattingToolbar={false}
-        editable={!readOnly}
+        slashMenu={false}
+        sideMenu={false}
         theme="light"
+        comments={false}
+        aria-label={t('Document editor', {
+          description: 'Accessible name of the editor area',
+        })}
+        // To not clipped the floating part in the editor area
+        portalElements={{ default: null }}
       >
-        <BlockNoteToolbar />
+        {aiBlockNoteAllowed && AIMenuController && AIMenu && (
+          <AIMenuController aiMenu={AIMenu} />
+        )}
+        <BlockNoteSuggestionMenu aiAllowed={aiBlockNoteAllowed} />
+        <BlockNoteToolbar aiAllowed={aiBlockNoteAllowed} />
+        <DocsSideMenu />
+        {showComments && <FloatingComposerController />}
+        {showComments && !isCommentSideBarOpen && <FloatingThreadController />}
+        {threadsSidebarTarget &&
+          createPortal(
+            <ThreadsSidebar
+              filter={threadsSidebarFilter}
+              sort="recent-activity"
+            />,
+            threadsSidebarTarget,
+          )}
       </BlockNoteView>
     </Box>
   );
 };
 
-interface BlockNoteEditorVersionProps {
+interface BlockNoteReaderProps {
+  docId: Doc['id'];
   initialContent: Y.XmlFragment;
+  isMainEditor?: boolean;
 }
 
-export const BlockNoteEditorVersion = ({
+export const BlockNoteReader = ({
+  docId,
   initialContent,
-}: BlockNoteEditorVersionProps) => {
-  const readOnly = true;
+  isMainEditor = true,
+}: BlockNoteReaderProps) => {
+  const { user } = useAuth();
   const { setEditor } = useEditorStore();
+  const { threadStore } = useComments(docId, false, user);
   const editor = useCreateBlockNote(
-    {
+    withCollaboration({
       collaboration: {
         fragment: initialContent,
         user: {
@@ -218,22 +417,54 @@ export const BlockNoteEditorVersion = ({
         },
         provider: undefined,
       },
-    },
-    [initialContent],
+      setIdAttribute: true,
+      schema: blockNoteSchema,
+      extensions: [
+        CommentsExtension({
+          threadStore,
+          resolveUsers: async () => {
+            return Promise.resolve([]);
+          },
+        }),
+      ],
+    }),
+    [initialContent, threadStore],
   );
-  useHeadings(editor);
 
   useEffect(() => {
+    if (!isMainEditor) {
+      return;
+    }
+
     setEditor(editor);
 
     return () => {
+      if (!isMainEditor) {
+        return;
+      }
       setEditor(undefined);
     };
-  }, [setEditor, editor]);
+  }, [setEditor, editor, isMainEditor]);
+
+  useHeadings(editor);
+
+  useScrollToBlockAnchor();
 
   return (
-    <Box $css={cssEditor(readOnly)}>
-      <BlockNoteView editor={editor} editable={!readOnly} theme="light" />
+    <Box>
+      <DocsEditorStyle />
+      <DocsCommentsStyle canSeeComment={false} />
+      <BlockNoteView
+        className="--docs--main-editor"
+        editor={editor}
+        editable={false}
+        theme="light"
+        formattingToolbar={false}
+        slashMenu={false}
+        comments={false}
+      >
+        <BlockNoteToolbar aiAllowed={false} />
+      </BlockNoteView>
     </Box>
   );
 };

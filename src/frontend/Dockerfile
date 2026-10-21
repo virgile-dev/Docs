@@ -1,17 +1,24 @@
-FROM node:20-alpine AS frontend-deps
+ARG FRONTEND_IMAGE=frontend-build-output
+
+FROM node:24-alpine AS frontend-deps
+
+# Upgrade system packages to install security updates
+RUN apk update && \
+  apk upgrade && \
+  rm -rf /var/cache/apk/*
 
 WORKDIR /home/frontend/
 
 COPY ./src/frontend/package.json ./package.json
 COPY ./src/frontend/yarn.lock ./yarn.lock
 COPY ./src/frontend/apps/impress/package.json ./apps/impress/package.json
-COPY ./src/frontend/packages/eslint-config-impress/package.json ./packages/eslint-config-impress/package.json
+COPY ./src/frontend/packages/eslint-plugin-docs/package.json ./packages/eslint-plugin-docs/package.json
 
 RUN yarn install --frozen-lockfile
 
 COPY .dockerignore ./.dockerignore
 COPY ./src/frontend/.prettierrc.js ./.prettierrc.js
-COPY ./src/frontend/packages/eslint-config-impress ./packages/eslint-config-impress
+COPY ./src/frontend/packages/eslint-plugin-docs ./packages/eslint-plugin-docs
 COPY ./src/frontend/apps/impress ./apps/impress
 
 ### ---- Front-end builder image ----
@@ -27,7 +34,7 @@ EXPOSE 3000
 
 CMD [ "yarn", "dev"]
 
-# Tilt will rebuild impress target so, we dissociate impress and impress-builder 
+# Tilt will rebuild impress target so, we dissociate impress and impress-builder
 # to avoid rebuilding the app at every changes.
 FROM impress AS impress-builder
 
@@ -39,18 +46,33 @@ ENV NEXT_PUBLIC_API_ORIGIN=${API_ORIGIN}
 ARG SW_DEACTIVATED
 ENV NEXT_PUBLIC_SW_DEACTIVATED=${SW_DEACTIVATED}
 
+ARG PUBLISH_AS_MIT
+ENV NEXT_PUBLIC_PUBLISH_AS_MIT=${PUBLISH_AS_MIT}
+
 RUN yarn build
 
+# Normalize output path to /app (matches the runtime-prod layout)
+FROM scratch AS frontend-build-output
+COPY --from=impress-builder /home/frontend/apps/impress/out /app
+
+# When FRONTEND_IMAGE is set to an external image, BuildKit skips
+# frontend-deps,impress-builder, and frontend-build-output entirely
+FROM ${FRONTEND_IMAGE} AS frontend-source
+
 # ---- Front-end image ----
-FROM nginxinc/nginx-unprivileged:1.26-alpine AS frontend-production
+FROM nginxinc/nginx-unprivileged:alpine3.24 AS frontend-production
+
+# Upgrade system packages to install security updates
+USER root
+RUN apk update && \
+  apk upgrade && \
+  rm -rf /var/cache/apk/*
 
 # Un-privileged user running the application
 ARG DOCKER_USER
 USER ${DOCKER_USER}
 
-COPY --from=impress-builder \
-    /home/frontend/apps/impress/out \
-    /usr/share/nginx/html
+COPY --from=frontend-source /app /app
 
 COPY ./src/frontend/apps/impress/conf/default.conf /etc/nginx/conf.d
 COPY ./docker/files/usr/local/bin/entrypoint /usr/local/bin/entrypoint

@@ -1,16 +1,24 @@
-import { useAuthStore } from '@/core/auth';
-import { Access, Role } from '@/features/docs/doc-management';
+import { Access, Role } from '@/docs/doc-management';
+import { useAuth } from '@/features/auth';
 
-export const useWhoAmI = (access: Access) => {
-  const { userData } = useAuthStore();
+export const useWhoAmI = (access?: Access) => {
+  const { user } = useAuth();
 
-  const isMyself = userData?.id === access.user.id;
+  if (!access) {
+    return {
+      isLastOwner: false,
+      isOtherOwner: false,
+      isMyself: false,
+    };
+  }
+
+  const isMyself = user?.id === access.user.id;
   const rolesAllowed = access.abilities.set_role_to;
 
   const isLastOwner =
     !rolesAllowed.length && access.role === Role.OWNER && isMyself;
 
-  const isOtherOwner = access.role === Role.OWNER && userData?.id && !isMyself;
+  const isOtherOwner = access.role === Role.OWNER && user?.id && !isMyself;
 
   return {
     isLastOwner,

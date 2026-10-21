@@ -2,12 +2,12 @@
 # impress package
 #
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.13.4,<0.14"]
+build-backend = "uv_build"
 
 [project]
 name = "impress"
-version = "2.0.0"
+version = "6.0.2"
 authors = [{ "name" = "DINUM", "email" = "dev@mail.numerique.gouv.fr" }]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -19,80 +19,105 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
 ]
-description = "An application to print markdown to pdf from a set of managed templates."
+description = "Docs is a collaborative text editor designed to address common challenges in knowledge building and sharing."
 keywords = ["Django", "Contacts", "Templates", "RBAC"]
-license = { file = "LICENSE" }
-readme = "README.md"
-requires-python = ">=3.12"
+license = "MIT"
+requires-python = "~=3.14.0"
 dependencies = [
-    "boto3==1.35.90",
-    "Brotli==1.1.0",
-    "celery[redis]==5.4.0",
+    "beautifulsoup4==4.15.0",
+    "boto3==1.43.103",
+    "Brotli==1.2.0",
+    "celery[redis]==5.6.3",
+    "dj-database-url==3.1.2",
     "django-configurations==2.5.1",
-    "django-cors-headers==4.6.0",
-    "django-countries==7.6.1",
-    "django-filter==24.3",
-    "django-parler==2.3",
-    "redis==5.2.1",
-    "django-redis==5.4.0",
-    "django-storages[s3]==1.14.4",
+    "django-cors-headers==4.9.0",
+    "django-countries==9.1.0",
+    "django-csp==4.0",
+    "django-filter==26.1",
+    "django-lasuite[all]==0.0.31",
+    "django-parler==2.4",
+    "django-prometheus==2.5.0",
+    "django-redis==7.0.0",
+    "django-silk==5.6.0",
+    "django-storages[s3]==1.14.6",
     "django-timezone-field>=5.1",
-    "django==5.1.4",
-    "djangorestframework==3.15.2",
-    "drf_spectacular==0.28.0",
-    "dockerflow==2024.4.2",
-    "easy_thumbnails==2.10",
-    "factory_boy==3.3.1",
-    "gunicorn==23.0.0",
-    "jsonschema==4.23.0",
-    "markdown==3.7",
-    "nested-multipart-parser==1.5.0",
-    "openai==1.58.1",
-    "psycopg[binary]==3.2.3",
-    "PyJWT==2.10.1",
-    "pypandoc==1.14",
-    "python-frontmatter==1.1.0",
+    "django<6.0.0",
+    "django-treebeard<5.0.0",
+    "djangorestframework==3.18.1",
+    "django-waffle==5.0.0",
+    "drf_spectacular==0.30.0",
+    "dockerflow==2026.3.4",
+    "easy_thumbnails==2.10.1",
+    "emoji==2.16.0",
+    "factory_boy==3.3.3",
+    "gunicorn==26.2.0",
+    "joserfc==1.7.5",
+    "jsonschema==4.26.0",
+    "langfuse==3.11.2",
+    "lxml==6.1.3",
+    "markdown==3.11",
+    "mozilla-django-oidc==5.0.2",
+    "nested-multipart-parser==1.6.0",
+    "openai==3.19.2",
+    "posthog==7.60.1",
+    "prometheus-client==0.26.0",
+    "psycopg[binary,pool]==3.3.6",
+    "pycrdt==0.14.6",
+    "pydantic==2.13.5",
+    "pydantic-ai-slim[logfire,mistral,openai,web]==2.53.0",
+    "PyJWT[crypto]==2.15.0",
     "python-magic==0.4.27",
-    "requests==2.32.3",
-    "sentry-sdk==2.19.2",
-    "url-normalize==1.4.3",
-    "WeasyPrint>=60.2",
-    "whitenoise==6.8.2",
-    "mozilla-django-oidc==4.0.1",
+    "redis<6.0.0",
+    "requests==2.34.2",
+    "sentry-sdk==2.71.0",
+    "servestatic==4.3.4",
+    "uvicorn==0.54.0",
 ]
 
 [project.urls]
-"Bug Tracker" = "https://github.com/numerique-gouv/impress/issues/new"
-"Changelog" = "https://github.com/numerique-gouv/impress/blob/main/CHANGELOG.md"
-"Homepage" = "https://github.com/numerique-gouv/impress"
-"Repository" = "https://github.com/numerique-gouv/impress"
+"Bug Tracker" = "https://github.com/suitenumerique/docs/issues/new"
+"Changelog" = "https://github.com/suitenumerique/docs/blob/main/CHANGELOG.md"
+"Homepage" = "https://github.com/suitenumerique/docs"
+"Repository" = "https://github.com/suitenumerique/docs"
 
 [project.optional-dependencies]
 dev = [
-    "django-extensions==3.2.3",
-    "drf-spectacular-sidecar==2024.12.1",
-    "freezegun==1.5.1",
+    "django-extensions==4.1",
+    "django-test-migrations==1.7.0",
+    "drf-spectacular-sidecar==2026.9.1",
+    "freezegun==1.5.5",
     "ipdb==0.13.13",
-    "ipython==8.31.0",
-    "pyfakefs==5.7.3",
-    "pylint-django==2.6.1",
-    "pylint==3.3.3",
-    "pytest-cov==6.0.0",
-    "pytest-django==4.9.0",
-    "pytest==8.3.4",
+    "ipython==9.17.1",
+    "pyfakefs==6.2.0",
+    "pylint-django==2.8.0",
+    "pylint==4.0.9",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "pytest-django==4.14.0",
+    "pytest==9.1.1",
     "pytest-icdiff==0.9",
-    "pytest-xdist==3.6.1",
-    "responses==0.25.3",
-    "ruff==0.8.4",
-    "types-requests==2.32.0.20241016",
+    "pytest-xdist==3.8.0",
+    "responses==0.26.3",
+    "ruff==0.16.0",
+    "types-requests==2.33.0.20260906",
 ]
 
-[tool.setuptools]
-packages = { find = { where = ["."], exclude = ["tests"] } }
-zip-safe = true
+[tool.basedpyright]
+typeCheckingMode = "standard"
 
-[tool.distutils.bdist_wheel]
-universal = true
+[tool.uv.build-backend]
+module-name = [
+    "core",
+    "demo",
+    "impress",
+    "loadtest"
+]
+module-root = ""
+source-exclude = [
+    "**/tests/**",
+    "**/test_*.py",
+    "**/tests.py",
+]
 
 [tool.ruff]
 exclude = [
@@ -101,7 +126,6 @@ exclude = [
     "build",
     "venv",
     "__pycache__",
-    "*/migrations/*",
 ]
 line-length = 88
 

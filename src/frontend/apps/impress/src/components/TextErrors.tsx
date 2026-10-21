@@ -1,4 +1,4 @@
-import { Alert, VariantType } from '@openfun/cunningham-react';
+import { Alert, VariantType } from '@gouvfr-lasuite/ui-components';
 import { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import styled from 'styled-components';
@@ -7,7 +7,7 @@ import { Box, Text, TextType } from '@/components';
 
 const AlertStyled = styled(Alert)`
   & .c__button--tertiary:hover {
-    background-color: var(--c--theme--colors--greyscale-200);
+    background-color: var(--c--globals--colors--gray-200);
   }
 `;
 
@@ -25,29 +25,51 @@ export const TextErrors = ({
   canClose = false,
   ...textProps
 }: TextErrorsProps) => {
+  return (
+    <AlertStyled
+      canClose={canClose}
+      type={VariantType.ERROR}
+      icon={icon}
+      className="--docs--text-errors"
+    >
+      <TextOnlyErrors
+        causes={causes}
+        defaultMessage={defaultMessage}
+        {...textProps}
+      />
+    </AlertStyled>
+  );
+};
+
+export const TextOnlyErrors = ({
+  causes,
+  defaultMessage,
+  ...textProps
+}: TextErrorsProps) => {
   const { t } = useTranslation();
 
   return (
-    <AlertStyled canClose={canClose} type={VariantType.ERROR} icon={icon}>
-      <Box $direction="column" $gap="0.2rem">
-        {causes &&
-          causes.map((cause, i) => (
-            <Text
-              key={`causes-${i}`}
-              $theme="danger"
-              $textAlign="center"
-              {...textProps}
-            >
-              {cause}
-            </Text>
-          ))}
-
-        {!causes && (
-          <Text $theme="danger" $textAlign="center" {...textProps}>
-            {defaultMessage || t('Something bad happens, please retry.')}
+    <Box $direction="column" $gap="0.2rem">
+      {causes &&
+        causes.map((cause, i) => (
+          <Text
+            key={`causes-${i}`}
+            $theme="error"
+            $textAlign="center"
+            {...textProps}
+          >
+            {cause}
           </Text>
-        )}
-      </Box>
-    </AlertStyled>
+        ))}
+
+      {!causes && (
+        <Text $theme="error" $textAlign="center" {...textProps}>
+          {defaultMessage ||
+            t('Something bad happens, please retry.', {
+              description: 'Generic error message shown when a request fails',
+            })}
+        </Text>
+      )}
+    </Box>
   );
 };

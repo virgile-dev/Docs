@@ -2,16 +2,29 @@ import { PropsWithChildren } from 'react';
 
 import { Box } from '@/components';
 import { Footer } from '@/features/footer';
-import { Header } from '@/features/header';
+import { HeaderFloatingBar } from '@/features/header/components/HeaderFloatingBar';
+import { LeftPanel } from '@/features/left-panel';
 
-export function PageLayout({ children }: PropsWithChildren) {
+import { MainContent } from './MainLayout';
+
+interface PageLayoutProps {
+  withFooter?: boolean;
+  withLeftPanel?: boolean;
+}
+
+export function PageLayout({
+  children,
+  withFooter = true,
+  withLeftPanel = true,
+}: PropsWithChildren<PageLayoutProps>) {
   return (
-    <Box $minHeight="100vh">
-      <Header />
-      <Box as="main" $width="100%" $css="flex-grow:1;">
+    <Box className="--docs--page-layout" $direction="row" $minHeight="100vh">
+      {withLeftPanel && <LeftPanel />}
+      <MainContent>
+        <HeaderFloatingBar />
         {children}
-      </Box>
-      <Footer />
+      </MainContent>
+      {withFooter && <Footer />}
     </Box>
   );
 }

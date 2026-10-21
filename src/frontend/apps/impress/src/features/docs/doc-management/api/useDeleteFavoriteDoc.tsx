@@ -1,7 +1,11 @@
+import { announce } from '@react-aria/live-announcer';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 
 import { APIError, errorCauses, fetchAPI } from '@/api';
-import { Doc } from '@/features/docs';
+import { syncDocInTree, useTreeContextOrNull } from '@/docs/doc-tree/utils';
+
+import { Doc } from '../types';
 
 export type DeleteFavoriteDocParams = Pick<Doc, 'id'>;
 
@@ -20,23 +24,46 @@ export const deleteFavoriteDoc = async ({ id }: DeleteFavoriteDocParams) => {
 
 interface DeleteFavoriteDocProps {
   onSuccess?: () => void;
-  listInvalideQueries?: string[];
+  listInvalidQueries?: string[];
 }
 
 export function useDeleteFavoriteDoc({
   onSuccess,
-  listInvalideQueries,
+  listInvalidQueries,
 }: DeleteFavoriteDocProps) {
   const queryClient = useQueryClient();
+  const { t } = useTranslation();
+  const treeContext = useTreeContextOrNull();
+
   return useMutation<void, APIError, DeleteFavoriteDocParams>({
     mutationFn: deleteFavoriteDoc,
-    onSuccess: () => {
-      listInvalideQueries?.forEach((queryKey) => {
+    onSuccess: (_data, { id }) => {
+      listInvalidQueries?.forEach((queryKey) => {
         void queryClient.invalidateQueries({
           queryKey: [queryKey],
         });
       });
+
+      syncDocInTree(
+        treeContext,
+        id,
+        { is_favorite: false },
+        { keepFocus: true },
+      );
+
+      const message = t('Document unstarred successfully!', {
+        description: 'Toast shown after removing a document from favorites',
+      });
+      announce(message, 'polite');
+
       onSuccess?.();
+    },
+    onError: () => {
+      const message = t('Failed to unstar the document.', {
+        description:
+          'Toast shown when removing a document from favorites failed',
+      });
+      announce(message, 'assertive');
     },
   });
 }

@@ -3,39 +3,60 @@ import { create } from 'zustand';
 
 import { tokens } from './cunningham-tokens';
 
-type Tokens = typeof tokens.themes.default & Partial<typeof tokens.themes.dsfr>;
-type ColorsTokens = Tokens['theme']['colors'];
-type FontSizesTokens = Tokens['theme']['font']['sizes'];
-type SpacingsTokens = Tokens['theme']['spacings'];
+type Tokens = typeof tokens.themes.default &
+  Partial<(typeof tokens.themes)[keyof typeof tokens.themes]>;
+type ColorsTokens = Tokens['globals']['colors'];
+type FontSizesTokens = Tokens['globals']['font']['sizes'];
+type SpacingsTokens = Tokens['globals']['spacings'];
 type ComponentTokens = Tokens['components'];
+type ContextualTokens = Tokens['contextuals'];
 export type Theme = keyof typeof tokens.themes;
 
-interface AuthStore {
-  theme: string;
+interface ThemeStore {
+  colorsTokens: Partial<ColorsTokens>;
+  componentTokens: ComponentTokens;
+  contextualTokens: ContextualTokens;
+  currentTokens: Partial<Tokens>;
+  fontSizesTokens: Partial<FontSizesTokens>;
   setTheme: (theme: Theme) => void;
-  themeTokens: () => Partial<Tokens['theme']>;
-  colorsTokens: () => Partial<ColorsTokens>;
-  fontSizesTokens: () => Partial<FontSizesTokens>;
-  spacingsTokens: () => Partial<SpacingsTokens>;
-  componentTokens: () => ComponentTokens;
+  spacingsTokens: Partial<SpacingsTokens>;
+  theme: Theme;
+  themeTokens: Partial<Tokens['globals']>;
 }
 
-export const useCunninghamTheme = create<AuthStore>((set, get) => {
-  const currentTheme = () =>
-    merge(
-      tokens.themes['default'],
-      tokens.themes[get().theme as keyof typeof tokens.themes],
-    ) as Tokens;
+const getMergedTokens = (theme: Theme) => {
+  return merge({}, tokens.themes['default'], tokens.themes[theme]);
+};
 
-  return {
-    theme: 'dsfr',
-    themeTokens: () => currentTheme().theme,
-    colorsTokens: () => currentTheme().theme.colors,
-    componentTokens: () => currentTheme().components,
-    spacingsTokens: () => currentTheme().theme.spacings,
-    fontSizesTokens: () => currentTheme().theme.font.sizes,
-    setTheme: (theme: Theme) => {
-      set({ theme });
-    },
-  };
-});
+const DEFAULT_THEME: Theme = 'default';
+const defaultTokens = getMergedTokens(DEFAULT_THEME);
+
+const initialState: ThemeStore = {
+  colorsTokens: defaultTokens.globals.colors,
+  componentTokens: defaultTokens.components,
+  contextualTokens: defaultTokens.contextuals,
+  currentTokens: tokens.themes[DEFAULT_THEME],
+  fontSizesTokens: defaultTokens.globals.font.sizes,
+  setTheme: () => {},
+  spacingsTokens: defaultTokens.globals.spacings,
+  theme: DEFAULT_THEME,
+  themeTokens: defaultTokens.globals,
+};
+
+export const useCunninghamTheme = create<ThemeStore>((set) => ({
+  ...initialState,
+  setTheme: (theme: Theme) => {
+    const newTokens = getMergedTokens(theme);
+
+    set({
+      colorsTokens: newTokens.globals.colors,
+      componentTokens: newTokens.components,
+      contextualTokens: newTokens.contextuals,
+      currentTokens: tokens.themes[theme] as Partial<Tokens>,
+      fontSizesTokens: newTokens.globals.font.sizes,
+      spacingsTokens: newTokens.globals.spacings,
+      theme,
+      themeTokens: newTokens.globals,
+    });
+  },
+}));

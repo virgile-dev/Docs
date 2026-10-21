@@ -1,0 +1,114 @@
+import { Button, VariantType } from '@gouvfr-lasuite/ui-components';
+import { useTranslation } from 'react-i18next';
+
+import { Box, Card, Icon } from '@/components';
+import { useCunninghamTheme } from '@/cunningham';
+import {
+  Doc,
+  KEY_DOC,
+  KEY_LIST_DOC,
+  KEY_LIST_FAVORITE_DOC,
+  useRestoreDoc,
+} from '@/docs/doc-management';
+import { KEY_DOC_TREE } from '@/docs/doc-tree';
+import { KEY_LIST_DOC_TRASHBIN } from '@/docs/docs-grid';
+import { useToast } from '@/hooks';
+
+export const AlertRestore = ({ doc }: { doc: Doc }) => {
+  const { t } = useTranslation();
+  const { toast } = useToast();
+  const { spacingsTokens } = useCunninghamTheme();
+  const { mutate: restoreDoc, error } = useRestoreDoc({
+    listInvalidQueries: [
+      KEY_LIST_DOC,
+      KEY_LIST_DOC_TRASHBIN,
+      KEY_DOC,
+      KEY_LIST_FAVORITE_DOC,
+      KEY_DOC_TREE,
+    ],
+    options: {
+      onSuccess: (_data) => {
+        toast(
+          t('The document has been restored.', {
+            description: 'Toast shown after a deleted document is restored',
+          }),
+          VariantType.SUCCESS,
+          {
+            duration: 4000,
+          },
+        );
+      },
+      onError: () => {
+        toast(
+          t('An error occurred while restoring the document: {{error}}', {
+            description: 'Toast shown when restoring a deleted document fails',
+            error: error?.message,
+          }),
+          VariantType.ERROR,
+          {
+            duration: 4000,
+          },
+        );
+      },
+    },
+  });
+
+  return (
+    <Card
+      className="--docs--alert-restore"
+      aria-label={t('Alert deleted document', {
+        description:
+          'Accessible name of the banner shown on a deleted document',
+      })}
+      $radius={spacingsTokens['3xs']}
+      $direction="row"
+      $padding="xs"
+      $flex={1}
+      $align="center"
+      $gap={spacingsTokens['3xs']}
+      $justify="space-between"
+      $theme="error"
+    >
+      <Box
+        $withThemeInherited
+        $direction="row"
+        $align="center"
+        $gap={spacingsTokens['2xs']}
+      >
+        <Icon
+          $withThemeInherited
+          iconName="delete"
+          variant="symbols-outlined"
+        />
+        {t('Document deleted', {
+          description: 'Banner text shown on a document in the trashbin',
+        })}
+      </Box>
+      {doc.abilities.restore && (
+        <Button
+          onClick={() =>
+            restoreDoc({
+              docId: doc.id,
+            })
+          }
+          color="error"
+          variant="tertiary"
+          size="nano"
+          icon={
+            <Icon
+              iconName="undo"
+              $withThemeInherited
+              $size="18px"
+              variant="symbols-outlined"
+            />
+          }
+        >
+          {t('Restore', {
+            description:
+              'Button to restore a deleted document or an older version',
+          })}
+        </Button>
+      )}
+    </Card>
+  );
+};

@@ -1,6 +1,8 @@
 # e2e
 test-results/
-report/
+report*/
 blob-report/
 playwright/.auth/
 playwright/.cache/
+screenshots/
+.env.local

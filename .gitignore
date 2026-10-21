@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!src/loadtest/k6/lib/
 lib64/
 parts/
 sdist/
@@ -30,6 +31,7 @@ MANIFEST
 .next/
 
 # Translations	# Translations
+*.mo
 *.pot
 
 # Environments
@@ -39,9 +41,15 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-env.d/development/*
-!env.d/development/*.dist
+env.d/development/*.local
 env.d/terraform
+
+# Docker
+compose.override.yml
+docker/auth/*.local
+
+# yhub server local install
+src/yhub-server/node_modules/
 
 # npm
 node_modules
@@ -75,3 +83,15 @@ db.sqlite3
 .vscode/
 *.iml
 .devcontainer
+
+# AI
+CLAUDE.md
+!AGENTS.md
+.claude/
+.cursor/
+.cursorrules
+.windsurfrules
+.aider*
+.copilot/
+.github/copilot-instructions.md
+.playwright-mcp

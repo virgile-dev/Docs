@@ -1,3 +1,4 @@
+{{- if .Values.backend.createsuperuser.enabled -}}
 {{- $envVars := include "impress.common.env" (list . .Values.backend) -}}
 {{- $fullName := include "impress.backend.fullname" . -}}
 {{- $component := "backend" -}}
@@ -14,6 +15,8 @@ metadata:
   labels:
     {{- include "impress.common.labels" (list . $component) | nindent 4 }}
 spec:
+  ttlSecondsAfterFinished: {{ .Values.backend.jobs.ttlSecondsAfterFinished }}
+  backoffLimit: {{ .Values.backend.jobs.backoffLimit }}
   template:
     metadata:
       annotations:
@@ -27,6 +30,9 @@ spec:
       imagePullSecrets:
         - name: {{ include "impress.secret.dockerconfigjson.name" (dict "fullname" (include "impress.fullname" .) "imageCredentials" $.Values.image.credentials) }}
       {{- end}}
+      {{- if .Values.backend.serviceAccountName }}
+      serviceAccountName: {{ .Values.backend.serviceAccountName }}
+      {{- end }}
       shareProcessNamespace: {{ .Values.backend.shareProcessNamespace }}
       containers:
         {{- with .Values.backend.sidecars }}
@@ -43,10 +49,17 @@ spec:
           args:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if or $envVars .Values.jwtKeys.enabled }}
           env:
-            {{- if $envVars}}
             {{- $envVars | indent 12 }}
+            {{- if .Values.jwtKeys.enabled }}
+            {{- include "impress.jwtKeys.backendEnv" . | nindent 12 }}
             {{- end }}
+          {{- end }}
+          {{- if .Values.backend.envFrom }}
+          envFrom:
+            {{- toYaml .Values.backend.envFrom | nindent 12 }}
+          {{- end }}
           {{- with .Values.backend.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -56,6 +69,9 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if .Values.jwtKeys.enabled }}
+            {{- include "impress.jwtKeys.volumeMount" . | nindent 12 }}
+            {{- end }}
             {{- range $index, $value := .Values.mountFiles }}
             - name: "files-{{ $index }}"
               mountPath: {{ $value.path }}
@@ -85,6 +101,9 @@ spec:
       {{- end }}
       restartPolicy: {{ .Values.backend.createsuperuser.restartPolicy }}
       volumes:
+        {{- if .Values.jwtKeys.enabled }}
+        {{- include "impress.jwtKeys.volume" . | nindent 8 }}
+        {{- end }}
         {{- range $index, $value := .Values.mountFiles }}
         - name: "files-{{ $index }}"
           configMap:
@@ -120,3 +139,4 @@ spec:
           emptyDir: {}
           {{- end }}
         {{- end }}
+{{- end }}

@@ -1,49 +1,57 @@
-import { Button } from '@openfun/cunningham-react';
+import { useTranslation } from 'react-i18next';
 import { css } from 'styled-components';
 
-import { Box, Icon, Text } from '@/components';
-import { User } from '@/core';
+import { Box, BoxButton, Icon, Text } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
+import { User } from '@/features/auth';
 
 type Props = {
   user: User;
   onRemoveUser?: (user: User) => void;
 };
 export const DocShareAddMemberListItem = ({ user, onRemoveUser }: Props) => {
-  const { spacingsTokens, colorsTokens, fontSizesTokens } =
-    useCunninghamTheme();
-  const spacing = spacingsTokens();
-  const color = colorsTokens();
-  const fontSize = fontSizesTokens();
+  const { t } = useTranslation();
+  const { spacingsTokens } = useCunninghamTheme();
+
   return (
     <Box
+      className="--docs--doc-share-add-member-list-item"
       data-testid={`doc-share-add-member-${user.email}`}
-      $radius={spacing['3xs']}
+      $radius={spacingsTokens['3xs']}
       $direction="row"
       $height="fit-content"
       $justify="center"
       $align="center"
-      $gap={spacing['3xs']}
-      $background={color['greyscale-250']}
+      $gap={spacingsTokens['3xs']}
       $padding={{
-        left: spacing['xs'],
-        right: spacing['4xs'],
-        vertical: spacing['4xs'],
+        left: spacingsTokens['xs'],
+        right: spacingsTokens['4xs'],
+        vertical: spacingsTokens['4xs'],
       }}
-      $css={css`
-        color: ${color['greyscale-1000']};
-        font-size: ${fontSize['xs']};
-      `}
+      $withThemeBG
+      $theme="neutral"
+      $variation="secondary"
     >
-      <Text $variation="1000" $size="xs">
+      <Text
+        $withThemeInherited
+        $size="xs"
+        $css={css`
+          line-break: anywhere;
+        `}
+      >
         {user.full_name || user.email}
       </Text>
-      <Button
-        color="tertiary-text"
-        size="nano"
+      <BoxButton
         onClick={() => onRemoveUser?.(user)}
-        icon={<Icon $variation="600" $size="sm" iconName="close" />}
-      />
+        aria-label={t('Remove {{name}} from the invite list', {
+          description:
+            'Accessible name of the button removing a person from the pending invitees',
+          name: user.full_name || user.email,
+        })}
+        $withThemeInherited
+      >
+        <Icon $withThemeInherited $size="sm" iconName="close" />
+      </BoxButton>
     </Box>
   );
 };

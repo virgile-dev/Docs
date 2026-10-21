@@ -1,124 +1,315 @@
-import { Button, useModal } from '@openfun/cunningham-react';
-import { DateTime } from 'luxon';
+import { Tooltip } from '@gouvfr-lasuite/ui-components';
+import { useSearchParams } from 'next/navigation';
+import type { KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { css } from 'styled-components';
 
+import type { BoxType } from '@/components';
 import { Box, Icon, StyledLink, Text } from '@/components';
-import { Doc, LinkReach } from '@/features/docs/doc-management';
-import { DocShareModal } from '@/features/docs/doc-share';
+import { useConfig } from '@/core';
+import { useCunninghamTheme } from '@/cunningham';
+import { Doc, LinkReach, SimpleDocItem, useTrans } from '@/docs/doc-management';
+import { useLeftPanelStore } from '@/features/left-panel';
+import { useDate } from '@/hooks';
+import GlobeLockIcon from '@/icons/globe-lock.svg';
+import GlobeIcon from '@/icons/globe.svg';
+import StarIcon from '@/icons/star-filled.svg';
 import { useResponsiveStore } from '@/stores';
 
 import { DocsGridActions } from './DocsGridActions';
-import { SimpleDocItem } from './SimpleDocItem';
+import { DocsGridItemSharedButton } from './DocsGridItemSharedButton';
 
-type DocsGridItemProps = {
+type DocsGridItemProps = BoxType & {
   doc: Doc;
+  dragMode?: boolean;
 };
-export const DocsGridItem = ({ doc }: DocsGridItemProps) => {
-  const { isDesktop } = useResponsiveStore();
 
-  const shareModal = useModal();
-  const isPublic = doc.link_reach === LinkReach.PUBLIC;
-  const isAuthenticated = doc.link_reach === LinkReach.AUTHENTICATED;
-  const isRestricted = doc.link_reach === LinkReach.RESTRICTED;
-  const sharedCount = doc.nb_accesses - 1;
-  const isShared = sharedCount > 0;
+export const DocsGridItem = ({
+  doc,
+  dragMode = false,
+  $css,
+  ...boxProps
+}: DocsGridItemProps) => {
+  const searchParams = useSearchParams();
+  const target = searchParams.get('target');
+  const isInTrashbin = target === 'trashbin';
+  const { untitledDocument } = useTrans();
 
-  const handleShareClick = () => {
-    shareModal.open();
+  const { t } = useTranslation();
+  const { isSmallMobile, isLargeScreen } = useResponsiveStore();
+  const { dateToDisplay } = useDateToDisplay(doc, isInTrashbin);
+  const { openPanel } = useLeftPanelStore();
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      (e.target as HTMLAnchorElement).click();
+    }
+  };
+
+  /**
+   * When coming from the index page, we want the left panel to be open by default
+   */
+  const handleClick = () => {
+    if (isLargeScreen) {
+      openPanel();
+    }
   };
 
   return (
-    <>
+    <Box
+      $display="grid"
+      $padding={{ vertical: '4xs' }}
+      $align="center"
+      $cursor="pointer"
+      $css={css`
+        grid-column: 1 / -1;
+        grid-template-columns: subgrid;
+
+        &:nth-child(1n):not(:last-child) {
+          border-bottom: 1px solid
+            color-mix(
+              in srgb,
+              var(--c--contextuals--border--surface--primary) 50%,
+              transparent
+            );
+        }
+
+        ${$css}
+      `}
+      className="--docs--doc-grid-item"
+      aria-label={t('Open document: {{title}}', {
+        description: 'Accessible name of a document row, an action to open it',
+        title: doc.title || untitledDocument,
+      })}
+      {...boxProps}
+      role="listitem"
+      tabIndex={-1}
+    >
       <Box
+        tabIndex={0}
+        $display="grid"
         $direction="row"
-        $width="100%"
         $align="center"
-        $gap="20px"
-        role="row"
-        $padding={{ vertical: '2xs', horizontal: isDesktop ? 'base' : 'xs' }}
+        $margin={{
+          vertical: '3xs',
+        }}
+        $padding={{ right: '3xs' }}
         $css={css`
-          cursor: pointer;
+          grid-template-columns: subgrid;
+          grid-column: 1 / -1;
           border-radius: 4px;
           &:hover {
-            background-color: var(--c--theme--colors--greyscale-100);
+            background-color: ${
+              dragMode
+                ? 'none'
+                : 'var(--c--contextuals--background--semantic--contextual--primary)'
+            };
           }
         `}
       >
-        <StyledLink
-          $css="flex: 8; align-items: center;"
-          href={`/docs/${doc.id}`}
-        >
-          <Box
-            data-testid={`docs-grid-name-${doc.id}`}
-            $flex={6}
-            $padding={{ right: 'base' }}
-          >
-            <SimpleDocItem isPinned={doc.is_favorite} doc={doc} />
-          </Box>
-          {isDesktop && (
-            <Box $flex={2}>
-              <Text $variation="600" $size="xs">
-                {DateTime.fromISO(doc.updated_at).toRelative()}
-              </Text>
-            </Box>
-          )}
-        </StyledLink>
         <Box
-          $flex={1.15}
+          $css={css`
+            align-items: center;
+            min-width: 0;
+          `}
+        >
+          <StyledLink
+            $css={css`
+              width: 100%;
+              align-items: center;
+              min-width: 0;
+            `}
+            href={`/docs/${doc.id}`}
+            onKeyDown={handleKeyDown}
+            onClick={handleClick}
+          >
+            <DocsGridItemTitle doc={doc} withTooltip={!dragMode} />
+          </StyledLink>
+        </Box>
+
+        {!isSmallMobile && (
+          <StyledLink
+            href={`/docs/${doc.id}`}
+            tabIndex={-1}
+            aria-label={t('{{title}}, updated {{date}}', {
+              description:
+                'Accessible name of a document row with its last update',
+              title: doc.title || untitledDocument,
+              date: dateToDisplay,
+            })}
+          >
+            <DocsGridItemDate doc={doc} isInTrashbin={isInTrashbin} />
+          </StyledLink>
+        )}
+
+        <Box
           $direction="row"
           $align="center"
           $justify="flex-end"
-          $gap="32px"
+          $gap="sm"
+          onKeyDown={(e) => e.stopPropagation()}
         >
-          {isDesktop && isPublic && (
-            <Button
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                handleShareClick();
-              }}
-              size="nano"
-              fullWidth
-              icon={<Icon $variation="000" iconName="public" />}
-            >
-              {isShared ? sharedCount : undefined}
-            </Button>
+          {!isSmallMobile && (
+            <DocsGridItemSharedButton doc={doc} disabled={isInTrashbin} />
           )}
-          {isDesktop && !isPublic && isRestricted && isShared && (
-            <Button
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                handleShareClick();
-              }}
-              fullWidth
-              color="tertiary"
-              size="nano"
-              icon={<Icon $variation="800" $theme="primary" iconName="group" />}
-            >
-              {sharedCount}
-            </Button>
-          )}
-          {isDesktop && !isPublic && isAuthenticated && (
-            <Button
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                handleShareClick();
-              }}
-              fullWidth
-              size="nano"
-              icon={<Icon $variation="000" iconName="corporate_fare" />}
-            >
-              {sharedCount}
-            </Button>
-          )}
-          <DocsGridActions doc={doc} openShareModal={handleShareClick} />
+          <DocsGridActions doc={doc} isInTrashbin={isInTrashbin} />
         </Box>
       </Box>
-      {shareModal.isOpen && (
-        <DocShareModal doc={doc} onClose={shareModal.close} />
+    </Box>
+  );
+};
+
+export const DocsGridItemTitle = ({
+  doc,
+  withTooltip,
+  breadcrumb,
+}: {
+  doc: Doc;
+  withTooltip: boolean;
+  breadcrumb?: string;
+}) => {
+  const { t } = useTranslation();
+  const { isDesktop, isSmallMobile } = useResponsiveStore();
+  const { spacingsTokens } = useCunninghamTheme();
+  const isPublic = doc.link_reach === LinkReach.PUBLIC;
+  const isAuthenticated = doc.link_reach === LinkReach.AUTHENTICATED;
+  const isShared = isPublic || isAuthenticated;
+
+  return (
+    <Box
+      data-testid={`docs-grid-name-${doc.id}`}
+      $direction="row"
+      $align="center"
+      $gap={spacingsTokens.xs}
+      $padding={{ right: isDesktop ? 'md' : '3xs' }}
+      $maxWidth="100%"
+    >
+      <SimpleDocItem
+        doc={doc}
+        showDate={isSmallMobile}
+        breadcrumb={breadcrumb}
+      />
+      <Box $direction="row" $align="center" $gap="3xs">
+        {doc.is_favorite && (
+          <>
+            <Icon
+              $layer="background"
+              $theme="neutral"
+              $variation="primary"
+              $size="sm"
+              icon={<StarIcon aria-hidden="true" width={16} height={16} />}
+            />
+            <span className="sr-only">
+              {t('This document is starred', {
+                description:
+                  "Screen reader text indicating the document is in the user's favorites",
+              })}
+            </span>
+          </>
+        )}
+        {isShared && !withTooltip && <IconPublic isPublic={isPublic} />}
+        {isShared && withTooltip && (
+          <Tooltip
+            content={
+              <Text $textAlign="center">
+                {isPublic
+                  ? t('Accessible to anyone', {
+                      description: 'Tooltip: the document is public',
+                    })
+                  : t('Accessible to authenticated users', {
+                      description:
+                        'Tooltip: the document is open to logged-in users',
+                    })}
+              </Text>
+            }
+            placement="top"
+          >
+            <Box>
+              <IconPublic isPublic={isPublic} />
+            </Box>
+          </Tooltip>
+        )}
+      </Box>
+    </Box>
+  );
+};
+
+const IconPublic = ({ isPublic }: { isPublic: boolean }) => {
+  const { t } = useTranslation();
+
+  return (
+    <Icon
+      $layer="background"
+      $theme="neutral"
+      $variation="primary"
+      $size="sm"
+      aria-label={
+        isPublic
+          ? t('Accessible to anyone', {
+              description: 'Tooltip: the document is public',
+            })
+          : t('Accessible to authenticated users', {
+              description: 'Tooltip: the document is open to logged-in users',
+            })
+      }
+      icon={
+        isPublic ? (
+          <GlobeIcon aria-hidden="true" width={16} height={16} />
+        ) : (
+          <GlobeLockIcon aria-hidden="true" width={16} height={16} />
+        )
+      }
+    />
+  );
+};
+
+const useDateToDisplay = (doc: Doc, isInTrashbin: boolean) => {
+  const { data: config } = useConfig();
+  const { t } = useTranslation();
+  const { relativeDate, calculateDaysLeft } = useDate();
+
+  let dateToDisplay = relativeDate(doc.updated_at);
+  let isRelativeDate = true;
+
+  if (isInTrashbin && config?.TRASHBIN_CUTOFF_DAYS && doc.deleted_at) {
+    const daysLeft = calculateDaysLeft(
+      doc.deleted_at,
+      config.TRASHBIN_CUTOFF_DAYS,
+    );
+
+    dateToDisplay = `${daysLeft} ${t('days', { description: 'Unit after a number of days, plural form', count: daysLeft })}`;
+    isRelativeDate = false;
+  }
+
+  return { dateToDisplay, isRelativeDate };
+};
+
+export const DocsGridItemDate = ({
+  doc,
+  isInTrashbin,
+}: {
+  doc: Doc;
+  isInTrashbin: boolean;
+}) => {
+  const { dateToDisplay, isRelativeDate } = useDateToDisplay(doc, isInTrashbin);
+  const { formatDate } = useDate();
+
+  return (
+    <Text
+      $size="xs"
+      $layer="background"
+      $theme="neutral"
+      $variation="primary"
+      $shrink="0"
+    >
+      {isRelativeDate ? (
+        <Tooltip content={formatDate(doc.updated_at)} placement="top">
+          <time dateTime={doc.updated_at}>{dateToDisplay}</time>
+        </Tooltip>
+      ) : (
+        dateToDisplay
       )}
-    </>
+    </Text>
   );
 };

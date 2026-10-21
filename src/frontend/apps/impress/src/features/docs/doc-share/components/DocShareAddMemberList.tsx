@@ -1,18 +1,14 @@
-import {
-  Button,
-  VariantType,
-  useToastProvider,
-} from '@openfun/cunningham-react';
+import { Button, VariantType } from '@gouvfr-lasuite/ui-components';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { css } from 'styled-components';
 
 import { APIError } from '@/api';
-import { Box } from '@/components';
-import { User } from '@/core';
+import { Box, Card } from '@/components';
 import { useCunninghamTheme } from '@/cunningham';
-import { Doc, Role } from '@/features/docs';
-import { useLanguage } from '@/i18n/hooks/useLanguage';
+import { Doc, Role } from '@/docs/doc-management';
+import { User } from '@/features/auth';
+import { useToast } from '@/hooks';
+import { useResponsiveStore } from '@/stores';
 
 import { useCreateDocAccess, useCreateDocInvitation } from '../api';
 import { OptionType } from '../types';
@@ -39,15 +35,12 @@ export const DocShareAddMemberList = ({
   afterInvite,
 }: Props) => {
   const { t } = useTranslation();
-  const { toast } = useToastProvider();
+  const { toast } = useToast();
+  const { isSmallMobile } = useResponsiveStore();
   const [isLoading, setIsLoading] = useState(false);
-  const { spacingsTokens, colorsTokens } = useCunninghamTheme();
-  const { contentLanguage } = useLanguage();
+  const { spacingsTokens } = useCunninghamTheme();
   const [invitationRole, setInvitationRole] = useState<Role>(Role.EDITOR);
   const canShare = doc.abilities.accesses_manage;
-  const spacing = spacingsTokens();
-  const color = colorsTokens();
-
   const { mutateAsync: createInvitation } = useCreateDocInvitation();
   const { mutateAsync: createDocAccess } = useCreateDocAccess();
 
@@ -55,15 +48,19 @@ export const DocShareAddMemberList = ({
     let messageError =
       dataError['data']?.type === OptionType.INVITATION
         ? t(`Failed to create the invitation for {{email}}.`, {
+            description: 'Toast shown when inviting an email failed',
             email: dataError['data']?.value,
           })
-        : t(`Failed to add the member in the document.`);
+        : t(`Failed to add the member in the document.`, {
+            description: 'Toast shown when adding a member failed',
+          });
 
     if (
       dataError.cause?.[0] ===
       'Document invitation with this Email address and Document already exists.'
     ) {
       messageError = t('"{{email}}" is already invited to the document.', {
+        description: 'Error shown when inviting an email already invited',
         email: dataError['data']?.value,
       });
     }
@@ -73,6 +70,7 @@ export const DocShareAddMemberList = ({
       'This email is already associated to a registered user.'
     ) {
       messageError = t('"{{email}}" is already member of the document.', {
+        description: 'Error shown when inviting an existing member',
         email: dataError['data']?.value,
       });
     }
@@ -90,13 +88,12 @@ export const DocShareAddMemberList = ({
       const payload = {
         role: invitationRole,
         docId: doc.id,
-        contentLanguage,
       };
 
       return isInvitationMode
         ? createInvitation({
             ...payload,
-            email: user.email,
+            email: user.email.toLowerCase(),
           })
         : createDocAccess({
             ...payload,
@@ -113,25 +110,37 @@ export const DocShareAddMemberList = ({
     afterInvite?.();
     setIsLoading(false);
   };
+  const inviteLabel =
+    selectedUsers.length === 1
+      ? t('Invite {{name}}', {
+          description: 'Button to invite one person',
+          name: selectedUsers[0].full_name || selectedUsers[0].email,
+        })
+      : t('Invite {{count}} members', {
+          description: 'Button to invite several people, plural form',
+          count: selectedUsers.length,
+        });
 
   return (
-    <Box
+    <Card
+      className="--docs--doc-share-add-member-list"
       data-testid="doc-share-add-member-list"
-      $direction="row"
-      $padding={spacing.sm}
-      $align="center"
-      $background={color['greyscale-050']}
-      $radius={spacing['3xs']}
-      $css={css`
-        border: 1px solid ${color['greyscale-200']};
-      `}
+      $direction={isSmallMobile ? 'column' : 'row'}
+      $align={isSmallMobile ? 'stretch' : 'center'}
+      $padding={spacingsTokens.sm}
+      $scope="surface"
+      $theme="tertiary"
+      $variation=""
+      $border="1px solid var(--c--contextuals--border--surface--primary)"
+      $margin={{ bottom: 'sm' }}
+      $gap={spacingsTokens.xs}
     >
       <Box
         $direction="row"
         $align="center"
         $wrap="wrap"
         $flex={1}
-        $gap={spacing.xs}
+        $gap={spacingsTokens.xs}
       >
         {selectedUsers.map((user) => (
           <DocShareAddMemberListItem
@@ -141,16 +150,33 @@ export const DocShareAddMemberList = ({
           />
         ))}
       </Box>
-      <Box $direction="row" $align="center" $gap={spacing.xs}>
+      <Box
+        $direction="row"
+        $align="center"
+        $gap={spacingsTokens.xs}
+        $margin={{ left: isSmallMobile ? 'auto' : '' }}
+      >
         <DocRoleDropdown
           canUpdate={canShare}
           currentRole={invitationRole}
           onSelectRole={setInvitationRole}
+          ariaLabel={t('Invite new members', {
+            description:
+              'Accessible name of the role selector for new invitees',
+          })}
         />
-        <Button onClick={() => void onInvite()} disabled={isLoading}>
-          {t('Invite')}
+        <Button
+          onClick={() => void onInvite()}
+          disabled={isLoading}
+          aria-label={inviteLabel}
+          data-testid="doc-share-invite-button"
+          size={isSmallMobile ? 'small' : 'medium'}
+        >
+          {t('Invite', {
+            description: 'Button to invite people to a document',
+          })}
         </Button>
       </Box>
-    </Box>
+    </Card>
   );
 };

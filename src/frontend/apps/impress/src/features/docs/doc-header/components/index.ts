@@ -1,2 +1,3 @@
 export * from './DocHeader';
-export * from './DocVersionHeader';
+export * from './DocTitle';
+export * from './DocFloatingBar';

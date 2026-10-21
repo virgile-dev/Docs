@@ -1,38 +1,35 @@
-import {
-  Button,
-  VariantType,
-  useToastProvider,
-} from '@openfun/cunningham-react';
+import { Button } from '@gouvfr-lasuite/ui-components';
 import { useTranslation } from 'react-i18next';
 import { css } from 'styled-components';
 
-import { Box, HorizontalSeparator } from '@/components';
-import { Doc } from '@/features/docs';
+import { Box, HorizontalSeparator, Icon } from '@/components';
+import { Doc, useCopyDocLink } from '@/docs/doc-management';
 
 import { DocVisibility } from './DocVisibility';
 
-type Props = {
+type DocShareModalFooterProps = {
   doc: Doc;
   onClose: () => void;
 };
 
-export const DocShareModalFooter = ({ doc, onClose }: Props) => {
-  const canShare = doc.abilities.accesses_manage;
-  const { toast } = useToastProvider();
+export const DocShareModalFooter = ({
+  doc,
+  onClose,
+}: DocShareModalFooterProps) => {
+  const copyDocLink = useCopyDocLink(doc.id);
   const { t } = useTranslation();
   return (
     <Box
       $css={css`
         flex-shrink: 0;
       `}
+      className="--docs--doc-share-modal-footer"
     >
-      <HorizontalSeparator $withPadding={true} />
-      {canShare && (
-        <>
-          <DocVisibility doc={doc} />
-          <HorizontalSeparator />
-        </>
-      )}
+      <HorizontalSeparator $margin={{ vertical: 'sm' }} />
+
+      <DocVisibility doc={doc} />
+      <HorizontalSeparator $margin={{ vertical: 'sm' }} />
+
       <Box
         $direction="row"
         $justify="space-between"
@@ -40,27 +37,16 @@ export const DocShareModalFooter = ({ doc, onClose }: Props) => {
       >
         <Button
           fullWidth={false}
-          onClick={() => {
-            navigator.clipboard
-              .writeText(window.location.href)
-              .then(() => {
-                toast(t('Link Copied !'), VariantType.SUCCESS, {
-                  duration: 3000,
-                });
-              })
-              .catch(() => {
-                toast(t('Failed to copy link'), VariantType.ERROR, {
-                  duration: 3000,
-                });
-              });
-          }}
-          color="tertiary"
-          icon={<span className="material-icons">add_link</span>}
+          onClick={copyDocLink}
+          variant="secondary"
+          icon={<Icon iconName="add_link" $withThemeInherited />}
         >
-          {t('Copy link')}
+          {t('Copy link', {
+            description: 'Dropdown menu item to copy the document link',
+          })}
         </Button>
-        <Button onClick={onClose} color="primary">
-          {t('OK')}
+        <Button onClick={onClose}>
+          {t('OK', { description: 'Button closing a dialog' })}
         </Button>
       </Box>
     </Box>

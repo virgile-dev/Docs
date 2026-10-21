@@ -1,80 +1,92 @@
-import { Button, ModalSize, useModal } from '@openfun/cunningham-react';
-import { t } from 'i18next';
-import { useRouter } from 'next/navigation';
-import { PropsWithChildren } from 'react';
+import { useRouter } from 'next/router';
+import { useTranslation } from 'react-i18next';
 
-import { Box, Icon, SeparatedSection } from '@/components';
-import { useAuthStore } from '@/core';
-import { useCreateDoc } from '@/features/docs/doc-management';
-import { DocSearchModal } from '@/features/docs/doc-search';
-import { useCmdK } from '@/hook/useCmdK';
+import {
+  Box,
+  ButtonCloseModal,
+  ButtonLink,
+  SeparatedSection,
+} from '@/components';
+import { NewDocButton } from '@/docs/doc-management/components/NewDocButton';
+import { DocSearchButtonModal } from '@/docs/doc-search/components/DocSearchButtonModal';
+import { useAuth } from '@/features/auth';
+import { HEADER_ROW_MIN_HEIGHT, HeaderLogoLink } from '@/features/header';
+import HomeSVG from '@/icons/house-rounded.svg';
+import { useResponsiveStore } from '@/stores';
 
 import { useLeftPanelStore } from '../stores';
 
-export const LeftPanelHeader = ({ children }: PropsWithChildren) => {
+export const LeftPanelHeader = () => {
+  const { isMobile } = useResponsiveStore();
+  const { closePanel } = useLeftPanelStore();
+
+  return (
+    <Box $width="100%" className="--docs--left-panel-header">
+      <Box
+        $padding={{ horizontal: 'xs' }}
+        $direction="row"
+        $align="center"
+        $gap="2xs"
+        $minHeight={HEADER_ROW_MIN_HEIGHT}
+      >
+        <HeaderLogoLink headingLevel="h1" />
+        {isMobile && (
+          <Box $margin={{ left: 'auto' }}>
+            <ButtonCloseModal
+              onClick={closePanel}
+              aria-label="Close left panel"
+            />
+          </Box>
+        )}
+      </Box>
+      <LeftPanelHeaderActions />
+    </Box>
+  );
+};
+export const LeftPanelHeaderActions = () => {
   const router = useRouter();
-  const searchModal = useModal();
-  const auth = useAuthStore();
-  useCmdK(searchModal.open);
-  const { togglePanel } = useLeftPanelStore();
+  const { authenticated } = useAuth();
+  const { togglePanel, closePanel } = useLeftPanelStore();
+  const { t } = useTranslation();
+  const { isMobile } = useResponsiveStore();
 
-  const { mutate: createDoc } = useCreateDoc({
-    onSuccess: (doc) => {
-      router.push(`/docs/${doc.id}`);
+  const onHomeClick = () => {
+    if (isMobile) {
       togglePanel();
-    },
-  });
-
-  const goToHome = () => {
-    router.push('/');
-    togglePanel();
-  };
-
-  const createNewDoc = () => {
-    createDoc({ title: t('Untitled document') });
+    }
   };
 
   return (
-    <>
-      <Box $width="100%">
-        <SeparatedSection>
-          <Box
-            $padding={{ horizontal: 'sm' }}
-            $width="100%"
-            $direction="row"
-            $justify="space-between"
-            $align="center"
-          >
-            <Box $direction="row" $gap="2px">
-              <Button
-                onClick={goToHome}
-                size="medium"
-                color="tertiary-text"
-                icon={
-                  <Icon $variation="800" $theme="primary" iconName="house" />
-                }
-              />
-              {auth.authenticated && (
-                <Button
-                  onClick={searchModal.open}
-                  size="medium"
-                  color="tertiary-text"
-                  icon={
-                    <Icon $variation="800" $theme="primary" iconName="search" />
-                  }
-                />
-              )}
-            </Box>
-            {auth.authenticated && (
-              <Button onClick={createNewDoc}>{t('New doc')}</Button>
-            )}
-          </Box>
-        </SeparatedSection>
-        {children}
+    <SeparatedSection>
+      <Box
+        $padding={{ horizontal: 'sm' }}
+        $width="100%"
+        $direction="row"
+        $justify="space-between"
+        $align="center"
+      >
+        {authenticated && (
+          <NewDocButton onClose={() => isMobile && closePanel()} />
+        )}
+        <Box $direction="row" $gap="2px" $margin={{ left: 'auto' }}>
+          {router.pathname !== '/' && (
+            <ButtonLink
+              href="/"
+              data-testid="home-button"
+              onClick={onHomeClick}
+              aria-label={t('Back to homepage', {
+                description:
+                  'Accessible name of the button going back to the home page',
+              })}
+              size="medium"
+              color="brand"
+              variant="tertiary"
+              icon={<HomeSVG aria-hidden="true" width={24} height={24} />}
+            />
+          )}
+          <DocSearchButtonModal />
+        </Box>
       </Box>
-      {searchModal.isOpen && (
-        <DocSearchModal {...searchModal} size={ModalSize.LARGE} />
-      )}
-    </>
+    </SeparatedSection>
   );
 };

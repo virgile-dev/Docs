@@ -11,18 +11,33 @@ https://docs.djangoproject.com/en/3.1/ref/settings/
 """
 
 import os
+import stat
+import tempfile
 import tomllib
 from socket import gethostbyname, gethostname
 
 from django.utils.translation import gettext_lazy as _
 
+import dj_database_url
+import posthog
 import sentry_sdk
 from configurations import Configuration, values
+from corsheaders.defaults import default_headers
+from csp.constants import NONE
+from lasuite.configuration.values import SecretFileValue
+from lasuite.oidc_login.enums import OIDCUserEndpointFormat
 from sentry_sdk.integrations.django import DjangoIntegration
+from sentry_sdk.integrations.logging import ignore_logger
+
+# pylint: disable=too-many-lines
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join("/", "data")
+DATA_DIR = os.getenv("DATA_DIR", os.path.join("/", "data"))
+
+KB = 1024
+MB = KB * KB
+GB = MB * KB
 
 
 def get_release():
@@ -33,7 +48,7 @@ def get_release():
         with open(os.path.join(BASE_DIR, "pyproject.toml"), "rb") as f:
             pyproject_data = tomllib.load(f)
         return pyproject_data["project"]["version"]
-    except (FileNotFoundError, KeyError):
+    except FileNotFoundError, KeyError:
         return "NA"  # Default: not available
 
 
@@ -64,7 +79,10 @@ class Base(Configuration):
 
     # Security
     ALLOWED_HOSTS = values.ListValue([])
-    SECRET_KEY = values.Value(None)
+    # Django's default, made explicit because setup_prometheus_metrics may add
+    # to it in place: Production redefines it with the probes
+    SECURE_REDIRECT_EXEMPT = []
+    SECRET_KEY = SecretFileValue(None)
     SERVER_TO_SERVER_API_TOKENS = values.ListValue([])
 
     # Application definition
@@ -73,9 +91,13 @@ class Base(Configuration):
 
     # Database
     DATABASES = {
-        "default": {
+        "default": dj_database_url.config()
+        if values.DatabaseURLValue(
+            None, environ_name="DATABASE_URL", environ_prefix=None
+        )
+        else {
             "ENGINE": values.Value(
-                "django.db.backends.postgresql_psycopg2",
+                "django.db.backends.postgresql",
                 environ_name="DB_ENGINE",
                 environ_prefix=None,
             ),
@@ -83,16 +105,48 @@ class Base(Configuration):
                 "impress", environ_name="DB_NAME", environ_prefix=None
             ),
             "USER": values.Value("dinum", environ_name="DB_USER", environ_prefix=None),
-            "PASSWORD": values.Value(
+            "PASSWORD": SecretFileValue(
                 "pass", environ_name="DB_PASSWORD", environ_prefix=None
             ),
             "HOST": values.Value(
                 "localhost", environ_name="DB_HOST", environ_prefix=None
             ),
             "PORT": values.Value(5432, environ_name="DB_PORT", environ_prefix=None),
+            # Psycopg pool can be configured in the post_setup method
         }
     }
     DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
+
+    # Search
+    SEARCH_INDEXER_CLASS = values.Value(
+        default=None,
+        environ_name="SEARCH_INDEXER_CLASS",
+        environ_prefix=None,
+    )
+    SEARCH_INDEXER_BATCH_SIZE = values.IntegerValue(
+        default=100_000, environ_name="SEARCH_INDEXER_BATCH_SIZE", environ_prefix=None
+    )
+    INDEXING_URL = values.Value(
+        default=None, environ_name="INDEXING_URL", environ_prefix=None
+    )
+    SEARCH_INDEXER_COUNTDOWN = values.IntegerValue(
+        default=1, environ_name="SEARCH_INDEXER_COUNTDOWN", environ_prefix=None
+    )
+    SEARCH_INDEXER_SECRET = values.Value(
+        default=None, environ_name="SEARCH_INDEXER_SECRET", environ_prefix=None
+    )
+    SEARCH_URL = values.Value(
+        default=None, environ_name="SEARCH_URL", environ_prefix=None
+    )
+    SEARCH_INDEXER_QUERY_LIMIT = values.PositiveIntegerValue(
+        default=50, environ_name="SEARCH_INDEXER_QUERY_LIMIT", environ_prefix=None
+    )
+
+    MEDIA_AUTH_ORIGINAL_URL_HEADER = values.Value(
+        default="HTTP_X_ORIGINAL_URL",
+        environ_name="MEDIA_AUTH_ORIGINAL_URL_HEADER",
+        environ_prefix=None,
+    )
 
     # Static files (CSS, JavaScript, Images)
     STATIC_URL = "/static/"
@@ -111,9 +165,18 @@ class Base(Configuration):
         },
         "staticfiles": {
             "BACKEND": values.Value(
-                "whitenoise.storage.CompressedManifestStaticFilesStorage",
+                "servestatic.storage.CompressedManifestStaticFilesStorage",
                 environ_name="STORAGES_STATICFILES_BACKEND",
             ),
+        },
+        # django-silk looks up its binary cProfile (.prof) storage under this
+        # exact alias (see silk.models). Routing it through the S3 backend keeps
+        # profiling artifacts off the pod filesystem, which is read-only /
+        # ephemeral in Kubernetes; the `silk/` prefix isolates them in the
+        # bucket. Only used when SILK_ENABLED and the binary profiler are on.
+        "SILKY_STORAGE": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {"location": "silk"},
         },
     }
 
@@ -121,10 +184,10 @@ class Base(Configuration):
     AWS_S3_ENDPOINT_URL = values.Value(
         environ_name="AWS_S3_ENDPOINT_URL", environ_prefix=None
     )
-    AWS_S3_ACCESS_KEY_ID = values.Value(
+    AWS_S3_ACCESS_KEY_ID = SecretFileValue(
         environ_name="AWS_S3_ACCESS_KEY_ID", environ_prefix=None
     )
-    AWS_S3_SECRET_ACCESS_KEY = values.Value(
+    AWS_S3_SECRET_ACCESS_KEY = SecretFileValue(
         environ_name="AWS_S3_SECRET_ACCESS_KEY", environ_prefix=None
     )
     AWS_S3_REGION_NAME = values.Value(
@@ -135,11 +198,31 @@ class Base(Configuration):
         environ_name="AWS_STORAGE_BUCKET_NAME",
         environ_prefix=None,
     )
+    AWS_S3_SIGNATURE_VERSION = values.Value(
+        "s3v4",
+        environ_name="AWS_S3_SIGNATURE_VERSION",
+        environ_prefix=None,
+    )
 
     # Document images
-    DOCUMENT_IMAGE_MAX_SIZE = values.Value(
-        10 * (2**20),  # 10MB
+    DOCUMENT_IMAGE_MAX_SIZE = values.IntegerValue(
+        10 * MB,  # 10MB
         environ_name="DOCUMENT_IMAGE_MAX_SIZE",
+        environ_prefix=None,
+    )
+
+    # Allow duplicating a document together with its children
+    DUPLICATE_CHILDREN_FEATURE_ENABLED = values.BooleanValue(
+        default=True,
+        environ_name="DUPLICATE_CHILDREN_FEATURE_ENABLED",
+        environ_prefix=None,
+    )
+
+    DATA_UPLOAD_MAX_MEMORY_SIZE = values.IntegerValue(20 * MB)  # 20 MB
+
+    REACTIONS_MAX_PER_COMMENT = values.IntegerValue(
+        15,
+        environ_name="REACTIONS_MAX_PER_COMMENT",
         environ_prefix=None,
     )
 
@@ -210,18 +293,27 @@ class Base(Configuration):
         "application/x-ms-regedit",
         "application/x-msdownload",
         "application/xml",
-        "image/svg+xml",
     ]
-
-    # Document versions
-    DOCUMENT_VERSIONS_PAGE_SIZE = 50
+    DOCUMENT_ATTACHMENT_CHECK_UNSAFE_MIME_TYPES_ENABLED = values.BooleanValue(
+        True,
+        environ_name="DOCUMENT_ATTACHMENT_CHECK_UNSAFE_MIME_TYPES_ENABLED",
+        environ_prefix=None,
+    )
+    # Document /all endpoint
+    DOCUMENT_ALL_ENDPOINT_ENABLED = values.BooleanValue(
+        default=True,
+        environ_name="DOCUMENT_ALL_ENDPOINT_ENABLED",
+        environ_prefix=None,
+    )
 
     # Internationalization
     # https://docs.djangoproject.com/en/3.1/topics/i18n/
 
     # Languages
     LANGUAGE_CODE = values.Value("en-us")
-    LANGUAGE_COOKIE_NAME = "docs_language"  # cookie & language is set from frontend
+    # cookie & language is set from frontend
+    LANGUAGE_COOKIE_NAME = "docs_language"
+    LANGUAGE_COOKIE_PATH = "/"
 
     DRF_NESTED_MULTIPART_PARSER = {
         # output of parser is converted to querydict
@@ -233,9 +325,11 @@ class Base(Configuration):
     # fallback/default languages throughout the app.
     LANGUAGES = values.SingleNestedTupleValue(
         (
-            ("en-us", _("English")),
-            ("fr-fr", _("French")),
-            ("de-de", _("German")),
+            ("en-us", "English"),
+            ("fr-fr", "Français"),
+            ("de-de", "Deutsch"),
+            ("nl-nl", "Nederlands"),
+            ("es-es", "Español"),
         )
     )
 
@@ -271,7 +365,8 @@ class Base(Configuration):
 
     MIDDLEWARE = [
         "django.middleware.security.SecurityMiddleware",
-        "whitenoise.middleware.WhiteNoiseMiddleware",
+        "dockerflow.django.middleware.DockerflowMiddleware",
+        "servestatic.middleware.ServeStaticMiddleware",
         "django.contrib.sessions.middleware.SessionMiddleware",
         "django.middleware.locale.LocaleMiddleware",
         "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -279,8 +374,10 @@ class Base(Configuration):
         "django.middleware.common.CommonMiddleware",
         "django.middleware.csrf.CsrfViewMiddleware",
         "django.contrib.auth.middleware.AuthenticationMiddleware",
+        "core.middleware.SaveRawBodyMiddleware",
         "django.contrib.messages.middleware.MessageMiddleware",
-        "dockerflow.django.middleware.DockerflowMiddleware",
+        "csp.middleware.CSPMiddleware",
+        "waffle.middleware.WaffleMiddleware",
     ]
 
     AUTHENTICATION_BACKENDS = [
@@ -293,13 +390,17 @@ class Base(Configuration):
         # impress
         "core",
         "demo",
+        "servestatic",
         "drf_spectacular",
         # Third party apps
         "corsheaders",
+        "django_filters",
         "dockerflow.django",
         "rest_framework",
         "parler",
+        "treebeard",
         "easy_thumbnails",
+        "waffle",
         # Django
         "django.contrib.admin",
         "django.contrib.auth",
@@ -311,28 +412,100 @@ class Base(Configuration):
         "django.contrib.staticfiles",
         # OIDC third party
         "mozilla_django_oidc",
+        "lasuite.oidc_login",
+        "lasuite.malware_detection",
+        "lasuite.marketing",
+        "csp",
     ]
 
     # Cache
     CACHES = {
         "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
     }
+    DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS = values.BooleanValue(
+        default=True,
+        environ_name="DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS",
+        environ_prefix=None,
+    )
+    DJANGO_REDIS_LOGGER = values.Value(
+        default="core.cache.redis",
+        environ_name="DJANGO_REDIS_LOGGER",
+        environ_prefix=None,
+    )
 
     REST_FRAMEWORK = {
         "DEFAULT_AUTHENTICATION_CLASSES": (
-            "mozilla_django_oidc.contrib.drf.OIDCAuthentication",
-            "rest_framework.authentication.SessionAuthentication",
+            "core.authentication.backends.SessionAuthentication",
         ),
         "DEFAULT_PARSER_CLASSES": [
             "rest_framework.parsers.JSONParser",
             "nested_multipart_parser.drf.DrfNestedParser",
+        ],
+        "DEFAULT_RENDERER_CLASSES": [
+            # 🔒️ Disable BrowsableAPIRenderer which provides forms allowing a user to
+            # see all the data in the database (ie a serializer with a ForeignKey field
+            # will generate a form with a field with all possible values of the FK).
+            "rest_framework.renderers.JSONRenderer",
         ],
         "EXCEPTION_HANDLER": "core.api.exception_handler",
         "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
         "PAGE_SIZE": 20,
         "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.URLPathVersioning",
         "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+        "DEFAULT_THROTTLE_CLASSES": [
+            "lasuite.drf.throttling.MonitoredScopedRateThrottle",
+        ],
+        "DEFAULT_THROTTLE_RATES": {
+            "user_list_sustained": values.Value(
+                default="180/hour",
+                environ_name="API_USERS_LIST_THROTTLE_RATE_SUSTAINED",
+                environ_prefix=None,
+            ),
+            "user_list_burst": values.Value(
+                default="30/minute",
+                environ_name="API_USERS_LIST_THROTTLE_RATE_BURST",
+                environ_prefix=None,
+            ),
+            "document": values.Value(
+                default="80/minute",
+                environ_name="API_DOCUMENT_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+            "media_auth": values.Value(
+                default="200/minute",
+                environ_name="API_MEDIA_AUTH_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+            "document_access": values.Value(
+                default="50/minute",
+                environ_name="API_DOCUMENT_ACCESS_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+            "invitation": values.Value(
+                default="60/minute",
+                environ_name="API_INVITATION_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+            "document_ask_for_access": values.Value(
+                default="30/minute",
+                environ_name="API_DOCUMENT_ASK_FOR_ACCESS_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+            "mention": values.Value(
+                default="30/minute",
+                environ_name="API_MENTION_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+            "config": values.Value(
+                default="30/minute",
+                environ_name="API_CONFIG_THROTTLE_RATE",
+                environ_prefix=None,
+            ),
+        },
     }
+    MONITORED_THROTTLE_FAILURE_CALLBACK = (
+        "core.api.throttling.sentry_monitoring_throttle_failure"
+    )
 
     SPECTACULAR_SETTINGS = {
         "TITLE": "Impress API",
@@ -350,14 +523,24 @@ class Base(Configuration):
         "REDOC_DIST": "SIDECAR",
     }
 
+    TRASHBIN_CUTOFF_DAYS = values.IntegerValue(
+        30, environ_name="TRASHBIN_CUTOFF_DAYS", environ_prefix=None
+    )
+
+    # Mentions
+    MENTION_NOTIFICATION_COOLDOWN_MINUTES = values.IntegerValue(
+        15, environ_name="MENTION_NOTIFICATION_COOLDOWN_MINUTES", environ_prefix=None
+    )
+
     # Mail
     EMAIL_BACKEND = values.Value("django.core.mail.backends.smtp.EmailBackend")
     EMAIL_BRAND_NAME = values.Value(None)
     EMAIL_HOST = values.Value(None)
     EMAIL_HOST_USER = values.Value(None)
-    EMAIL_HOST_PASSWORD = values.Value(None)
+    EMAIL_HOST_PASSWORD = SecretFileValue(None)
     EMAIL_LOGO_IMG = values.Value(None)
     EMAIL_PORT = values.PositiveIntegerValue(None)
+    EMAIL_URL_APP = values.Value(None)
     EMAIL_USE_TLS = values.BooleanValue(False)
     EMAIL_USE_SSL = values.BooleanValue(False)
     EMAIL_FROM = values.Value("from@example.com")
@@ -367,32 +550,158 @@ class Base(Configuration):
 
     # CORS
     CORS_ALLOW_CREDENTIALS = True
-    CORS_ALLOW_ALL_ORIGINS = values.BooleanValue(True)
+    CORS_ALLOW_ALL_ORIGINS = values.BooleanValue(False)
     CORS_ALLOWED_ORIGINS = values.ListValue([])
     CORS_ALLOWED_ORIGIN_REGEXES = values.ListValue([])
 
     # Sentry
     SENTRY_DSN = values.Value(None, environ_name="SENTRY_DSN", environ_prefix=None)
+    SENTRY_TRACES_SAMPLE_RATE = values.FloatValue(
+        0.0, environ_name="SENTRY_TRACES_SAMPLE_RATE", environ_prefix=None
+    )
 
     # Collaboration
+    COLLABORATION_WS_URL = values.Value(
+        None, environ_name="COLLABORATION_WS_URL", environ_prefix=None
+    )
+    COLLABORATION_WS_INACTIVITY_TIMEOUT = values.IntegerValue(
+        None,
+        environ_name="COLLABORATION_WS_INACTIVITY_TIMEOUT",
+        environ_prefix=None,
+    )
+    # Whether an editor on that http fallback also publishes and receives presence
+    # (cursors). Turning it off drops the periodic presence update and the 15 seconds
+    # cap on the polling interval, at the price of no remote cursors on the fallback.
+    COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED = values.BooleanValue(
+        True,
+        environ_name="COLLABORATION_HTTP_FALLBACK_AWARENESS_ENABLED",
+        environ_prefix=None,
+    )
+    # Whether a browser whose websocket cannot open talks json, with the binary parts
+    # in base64, to the collaboration server over http instead of the lib0-any binary
+    # format, for the networks whose firewall refuses its content type.
+    COLLABORATION_HTTP_FALLBACK_JSON_ENABLED = values.BooleanValue(
+        False,
+        environ_name="COLLABORATION_HTTP_FALLBACK_JSON_ENABLED",
+        environ_prefix=None,
+    )
+    # How often, in milliseconds, a browser whose websocket cannot open polls the
+    # collaboration server over http instead. Every poll is authorized against the
+    # backend, so this sets most of the load such browsers put on it. At least 5000.
+    COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL = values.PositiveIntegerValue(
+        10000,
+        environ_name="COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL",
+        environ_prefix=None,
+    )
+    # Granularity of the document version history, in milliseconds.
+    # Increase or decrease this value to adjust the granularity of version history.
+    COLLABORATION_VERSION_GRANULARITY_MS = values.IntegerValue(
+        60000,
+        environ_name="COLLABORATION_VERSION_GRANULARITY_MS",
+        environ_prefix=None,
+    )
+    # How long a browser keeps its local (offline) copy of a document after the
+    # last time it was opened, in days. The frontend drops copies older than this
+    # on startup.
+    COLLABORATION_LOCAL_DOC_RETENTION_DAYS = values.IntegerValue(
+        30,
+        environ_name="COLLABORATION_LOCAL_DOC_RETENTION_DAYS",
+        environ_prefix=None,
+    )
+    # Base url of the collaboration server's REST api, including its route
+    # prefix (e.g. "http://yhub:3002/collaboration"). Server-to-server only:
+    # used with an admin JWT to migrate legacy documents and, later, to kick
+    # connections when permissions change.
     COLLABORATION_API_URL = values.Value(
         None, environ_name="COLLABORATION_API_URL", environ_prefix=None
     )
-    COLLABORATION_SERVER_SECRET = values.Value(
-        None, environ_name="COLLABORATION_SERVER_SECRET", environ_prefix=None
+
+    # yhub collaboration server, as reached by core.services.yhub_services
+    YHUB_API_BASE_URL = values.Value(
+        None, environ_name="YHUB_API_BASE_URL", environ_prefix=None
     )
-    COLLABORATION_WS_URL = values.Value(
-        None, environ_name="COLLABORATION_WS_URL", environ_prefix=None
+    # The yhub organization our documents live in. It must match the YHUB_ORG
+    # of the yhub server, which rejects the rooms of any other organization.
+    YHUB_ORG = values.Value("docs", environ_name="YHUB_ORG", environ_prefix=None)
+    YHUB_API_TIMEOUT = values.IntegerValue(
+        default=30,
+        environ_name="YHUB_API_TIMEOUT",
+        environ_prefix=None,
+    )
+    # Replaying the legacy history of a document reads every one of its S3
+    # versions, so it is the one call that can take minutes. Timing it out does
+    # not stop the collaboration server, it only loses the answer.
+    YHUB_MIGRATION_TIMEOUT = values.IntegerValue(
+        default=600,
+        environ_name="YHUB_MIGRATION_TIMEOUT",
+        environ_prefix=None,
+    )
+    # A change of accesses has the connections of a whole subtree re-checked,
+    # one call to the collaboration server per document. The walk resets this
+    # many documents per run and queues the rest after this many seconds, so
+    # that a large subtree is spread over time instead of fired at once.
+    YHUB_RESET_CONNECTIONS_BATCH_SIZE = values.PositiveIntegerValue(
+        default=50,
+        environ_name="YHUB_RESET_CONNECTIONS_BATCH_SIZE",
+        environ_prefix=None,
+    )
+    YHUB_RESET_CONNECTIONS_DELAY = values.FloatValue(
+        default=1.0,
+        environ_name="YHUB_RESET_CONNECTIONS_DELAY",
+        environ_prefix=None,
+    )
+
+    # JWT
+    # RSA private key (PEM) used to sign the tokens issued by
+    # core.services.jwt_services.JWTService. Prefer the JWT_PRIVATE_KEY_FILE
+    # environment variable, a PEM does not fit well in an environment variable.
+    JWT_PRIVATE_KEY = SecretFileValue(
+        None,
+        environ_name="JWT_PRIVATE_KEY",
+        environ_prefix=None,
+    )
+    # Lifetime, in seconds, of the tokens issued by the JWT service. It is both
+    # the "exp" claim horizon and the cache timeout of the generated tokens.
+    JWT_TOKEN_LIFETIME = values.IntegerValue(
+        default=3600,
+        environ_name="JWT_TOKEN_LIFETIME",
+        environ_prefix=None,
     )
 
     # Frontend
     FRONTEND_THEME = values.Value(
         None, environ_name="FRONTEND_THEME", environ_prefix=None
     )
+    FRONTEND_HOMEPAGE_FEATURE_ENABLED = values.BooleanValue(
+        default=True,
+        environ_name="FRONTEND_HOMEPAGE_FEATURE_ENABLED",
+        environ_prefix=None,
+    )
+    FRONTEND_CSS_URL = values.Value(
+        None, environ_name="FRONTEND_CSS_URL", environ_prefix=None
+    )
+    FRONTEND_JS_URL = values.Value(
+        None, environ_name="FRONTEND_JS_URL", environ_prefix=None
+    )
+    FRONTEND_SILENT_LOGIN_ENABLED = values.BooleanValue(
+        default=False, environ_name="FRONTEND_SILENT_LOGIN_ENABLED", environ_prefix=None
+    )
+    THEME_CUSTOMIZATION_FILE_PATH = values.Value(
+        os.path.join(BASE_DIR, "impress/configuration/theme/default.json"),
+        environ_name="THEME_CUSTOMIZATION_FILE_PATH",
+        environ_prefix=None,
+    )
 
-    # Crisp
-    CRISP_WEBSITE_ID = values.Value(
-        None, environ_name="CRISP_WEBSITE_ID", environ_prefix=None
+    THEME_CUSTOMIZATION_CACHE_TIMEOUT = values.IntegerValue(
+        60 * 60 * 24,
+        environ_name="THEME_CUSTOMIZATION_CACHE_TIMEOUT",
+        environ_prefix=None,
+    )
+
+    # Posthog
+    POSTHOG_KEY = SecretFileValue(None, environ_name="POSTHOG_KEY", environ_prefix=None)
+    POSTHOG_HOST = values.Value(
+        "https://eu.i.posthog.com", environ_name="POSTHOG_HOST", environ_prefix=None
     )
 
     # Easy thumbnails
@@ -408,9 +717,22 @@ class Base(Configuration):
     # Session
     SESSION_ENGINE = "django.contrib.sessions.backends.cache"
     SESSION_CACHE_ALIAS = "default"
-    SESSION_COOKIE_AGE = 60 * 60 * 12
+    SESSION_COOKIE_AGE = values.PositiveIntegerValue(
+        default=60 * 60 * 12, environ_name="SESSION_COOKIE_AGE", environ_prefix=None
+    )
+    SESSION_COOKIE_NAME = "docs_sessionid"
 
     # OIDC - Authorization Code Flow
+    OIDC_AUTHENTICATE_CLASS = values.Value(
+        "lasuite.oidc_login.views.OIDCAuthenticationRequestView",
+        environ_name="OIDC_AUTHENTICATE_CLASS",
+        environ_prefix=None,
+    )
+    OIDC_CALLBACK_CLASS = values.Value(
+        "lasuite.oidc_login.views.OIDCAuthenticationCallbackView",
+        environ_name="OIDC_CALLBACK_CLASS",
+        environ_prefix=None,
+    )
     OIDC_CREATE_USER = values.BooleanValue(
         default=True,
         environ_name="OIDC_CREATE_USER",
@@ -421,7 +743,7 @@ class Base(Configuration):
     OIDC_RP_CLIENT_ID = values.Value(
         "impress", environ_name="OIDC_RP_CLIENT_ID", environ_prefix=None
     )
-    OIDC_RP_CLIENT_SECRET = values.Value(
+    OIDC_RP_CLIENT_SECRET = SecretFileValue(
         None,
         environ_name="OIDC_RP_CLIENT_SECRET",
         environ_prefix=None,
@@ -438,8 +760,17 @@ class Base(Configuration):
     OIDC_OP_USER_ENDPOINT = values.Value(
         None, environ_name="OIDC_OP_USER_ENDPOINT", environ_prefix=None
     )
+    OIDC_OP_USER_ENDPOINT_FORMAT = values.Value(
+        OIDCUserEndpointFormat.AUTO.name,
+        environ_name="OIDC_OP_USER_ENDPOINT_FORMAT",
+        eviron_prefix=None,
+        choices=[e.name for e in OIDCUserEndpointFormat],
+    )
     OIDC_OP_LOGOUT_ENDPOINT = values.Value(
         None, environ_name="OIDC_OP_LOGOUT_ENDPOINT", environ_prefix=None
+    )
+    OIDC_OP_LOGOUT_USE_POST = values.BooleanValue(
+        False, environ_name="OIDC_OP_LOGOUT_USE_POST", environ_prefix=None
     )
     OIDC_AUTH_REQUEST_EXTRA_PARAMS = values.DictValue(
         {}, environ_name="OIDC_AUTH_REQUEST_EXTRA_PARAMS", environ_prefix=None
@@ -473,6 +804,28 @@ class Base(Configuration):
         environ_name="OIDC_FALLBACK_TO_EMAIL_FOR_IDENTIFICATION",
         environ_prefix=None,
     )
+    OIDC_USE_PKCE = values.BooleanValue(
+        default=False, environ_name="OIDC_USE_PKCE", environ_prefix=None
+    )
+    OIDC_PKCE_CODE_CHALLENGE_METHOD = values.Value(
+        default="S256",
+        environ_name="OIDC_PKCE_CODE_CHALLENGE_METHOD",
+        environ_prefix=None,
+    )
+    OIDC_PKCE_CODE_VERIFIER_SIZE = values.IntegerValue(
+        default=64, environ_name="OIDC_PKCE_CODE_VERIFIER_SIZE", environ_prefix=None
+    )
+    OIDC_STORE_ACCESS_TOKEN = values.BooleanValue(
+        default=False, environ_name="OIDC_STORE_ACCESS_TOKEN", environ_prefix=None
+    )
+    OIDC_STORE_REFRESH_TOKEN = values.BooleanValue(
+        default=False, environ_name="OIDC_STORE_REFRESH_TOKEN", environ_prefix=None
+    )
+    OIDC_STORE_REFRESH_TOKEN_KEY = values.Value(
+        default=None,
+        environ_name="OIDC_STORE_REFRESH_TOKEN_KEY",
+        environ_prefix=None,
+    )
 
     # WARNING: Enabling this setting allows multiple user accounts to share the same email
     # address. This may cause security issues and is not recommended for production use when
@@ -486,14 +839,126 @@ class Base(Configuration):
     USER_OIDC_ESSENTIAL_CLAIMS = values.ListValue(
         default=[], environ_name="USER_OIDC_ESSENTIAL_CLAIMS", environ_prefix=None
     )
-    USER_OIDC_FIELDS_TO_FULLNAME = values.ListValue(
-        default=["first_name", "last_name"],
-        environ_name="USER_OIDC_FIELDS_TO_FULLNAME",
+
+    OIDC_USERINFO_FULLNAME_FIELDS = values.ListValue(
+        default=values.ListValue(  # retrocompatibility
+            default=["first_name", "last_name"],
+            environ_name="USER_OIDC_FIELDS_TO_FULLNAME",
+            environ_prefix=None,
+        ),
+        environ_name="OIDC_USERINFO_FULLNAME_FIELDS",
         environ_prefix=None,
     )
-    USER_OIDC_FIELD_TO_SHORTNAME = values.Value(
-        default="first_name",
-        environ_name="USER_OIDC_FIELD_TO_SHORTNAME",
+    OIDC_USERINFO_SHORTNAME_FIELD = values.Value(
+        default=values.Value(  # retrocompatibility
+            default="first_name",
+            environ_name="USER_OIDC_FIELD_TO_SHORTNAME",
+            environ_prefix=None,
+        ),
+        environ_name="OIDC_USERINFO_SHORTNAME_FIELD",
+        environ_prefix=None,
+    )
+
+    # OIDC Resource Server
+
+    OIDC_RESOURCE_SERVER_ENABLED = values.BooleanValue(
+        default=False, environ_name="OIDC_RESOURCE_SERVER_ENABLED", environ_prefix=None
+    )
+
+    OIDC_RS_BACKEND_CLASS = values.Value(
+        "lasuite.oidc_resource_server.backend.ResourceServerBackend",
+        environ_name="OIDC_RS_BACKEND_CLASS",
+        environ_prefix=None,
+    )
+
+    OIDC_OP_URL = values.Value(None, environ_name="OIDC_OP_URL", environ_prefix=None)
+
+    OIDC_VERIFY_SSL = values.BooleanValue(
+        default=True, environ_name="OIDC_VERIFY_SSL", environ_prefix=None
+    )
+
+    OIDC_TIMEOUT = values.PositiveIntegerValue(
+        3, environ_name="OIDC_TIMEOUT", environ_prefix=None
+    )
+
+    OIDC_PROXY = values.Value(None, environ_name="OIDC_PROXY", environ_prefix=None)
+
+    OIDC_OP_INTROSPECTION_ENDPOINT = values.Value(
+        None, environ_name="OIDC_OP_INTROSPECTION_ENDPOINT", environ_prefix=None
+    )
+
+    OIDC_RS_CLIENT_ID = values.Value(
+        None, environ_name="OIDC_RS_CLIENT_ID", environ_prefix=None
+    )
+
+    OIDC_RS_CLIENT_SECRET = values.Value(
+        None, environ_name="OIDC_RS_CLIENT_SECRET", environ_prefix=None
+    )
+
+    OIDC_RS_AUDIENCE_CLAIM = values.Value(
+        "client_id", environ_name="OIDC_RS_AUDIENCE_CLAIM", environ_prefix=None
+    )
+
+    OIDC_RS_ENCRYPTION_ENCODING = values.Value(
+        "A256GCM", environ_name="OIDC_RS_ENCRYPTION_ENCODING", environ_prefix=None
+    )
+
+    OIDC_RS_ENCRYPTION_ALGO = values.Value(
+        "RSA-OAEP", environ_name="OIDC_RS_ENCRYPTION_ALGO", environ_prefix=None
+    )
+
+    OIDC_RS_SIGNING_ALGO = values.Value(
+        "ES256", environ_name="OIDC_RS_SIGNING_ALGO", environ_prefix=None
+    )
+
+    OIDC_RS_SCOPES = values.ListValue(
+        ["openid"], environ_name="OIDC_RS_SCOPES", environ_prefix=None
+    )
+
+    OIDC_RS_ALLOWED_AUDIENCES = values.ListValue(
+        default=[],
+        environ_name="OIDC_RS_ALLOWED_AUDIENCES",
+        environ_prefix=None,
+    )
+
+    OIDC_RS_PRIVATE_KEY_STR = values.Value(
+        default=None,
+        environ_name="OIDC_RS_PRIVATE_KEY_STR",
+        environ_prefix=None,
+    )
+    OIDC_RS_ENCRYPTION_KEY_TYPE = values.Value(
+        default="RSA",
+        environ_name="OIDC_RS_ENCRYPTION_KEY_TYPE",
+        environ_prefix=None,
+    )
+
+    # External API Configuration
+    # Configure available routes and actions for external_api endpoints
+    EXTERNAL_API = values.DictValue(
+        default={
+            "documents": {
+                "enabled": True,
+                "actions": [
+                    "list",
+                    "retrieve",
+                    "create",
+                    "children",
+                ],
+            },
+            "document_access": {
+                "enabled": False,
+                "actions": [],
+            },
+            "document_invitation": {
+                "enabled": False,
+                "actions": [],
+            },
+            "users": {
+                "enabled": True,
+                "actions": ["get_me"],
+            },
+        },
+        environ_name="EXTERNAL_API",
         environ_prefix=None,
     )
 
@@ -501,24 +966,88 @@ class Base(Configuration):
         default=True, environ_name="ALLOW_LOGOUT_GET_METHOD", environ_prefix=None
     )
 
-    # AI service
-    AI_API_KEY = values.Value(None, environ_name="AI_API_KEY", environ_prefix=None)
-    AI_BASE_URL = values.Value(None, environ_name="AI_BASE_URL", environ_prefix=None)
-    AI_MODEL = values.Value(None, environ_name="AI_MODEL", environ_prefix=None)
+    # AI settings
+    AI_ALLOW_REACH_FROM = values.Value(
+        choices=("public", "authenticated", "restricted"),
+        default="authenticated",
+        environ_name="AI_ALLOW_REACH_FROM",
+        environ_prefix=None,
+    )
 
+    MISTRAL_SDK_BASE_URL = values.Value(
+        None, environ_name="MISTRAL_SDK_BASE_URL", environ_prefix=None
+    )
+    MISTRAL_SDK_API_KEY = SecretFileValue(
+        None, environ_name="MISTRAL_SDK_API_KEY", environ_prefix=None
+    )
+
+    OPENAI_SDK_API_KEY = SecretFileValue(
+        default=SecretFileValue(  # retrocompatibility
+            None,
+            environ_name="AI_API_KEY",
+            environ_prefix=None,
+        ),
+        environ_name="OPENAI_SDK_API_KEY",
+        environ_prefix=None,
+    )
+    OPENAI_SDK_BASE_URL = values.Value(
+        default=values.Value(  # retrocompatibility
+            None, environ_name="AI_BASE_URL", environ_prefix=None
+        ),
+        environ_name="OPENAI_SDK_BASE_URL",
+        environ_prefix=None,
+    )
+    AI_BOT = values.DictValue(
+        default={
+            "name": _("Docs AI"),
+            "color": "#8bc6ff",
+        },
+        environ_name="AI_BOT",
+        environ_prefix=None,
+    )
     AI_DOCUMENT_RATE_THROTTLE_RATES = {
         "minute": 5,
         "hour": 100,
         "day": 500,
     }
+    # Master settings to enable AI features, if you set it to False,
+    # all AI features will be disabled even if the other settings are enabled.
+    AI_FEATURE_ENABLED = values.BooleanValue(
+        default=False, environ_name="AI_FEATURE_ENABLED", environ_prefix=None
+    )
+    # Far better UI but more flaky for the moment
+    # ⚠️ GPL license, be sure to comply with the Blocknote license
+    # if you enable it (https://www.blocknotejs.org/)
+    AI_FEATURE_BLOCKNOTE_ENABLED = values.BooleanValue(
+        default=False, environ_name="AI_FEATURE_BLOCKNOTE_ENABLED", environ_prefix=None
+    )
+    # UI with less features but more stable
+    # MIT friendly license, you can enable it without worrying about the license
+    AI_FEATURE_LEGACY_ENABLED = values.BooleanValue(
+        default=True, environ_name="AI_FEATURE_LEGACY_ENABLED", environ_prefix=None
+    )
+    AI_MODEL = values.Value(None, environ_name="AI_MODEL", environ_prefix=None)
+    AI_VERCEL_SDK_VERSION = values.IntegerValue(
+        6, environ_name="AI_VERCEL_SDK_VERSION", environ_prefix=None
+    )
     AI_USER_RATE_THROTTLE_RATES = {
         "minute": 3,
         "hour": 50,
         "day": 200,
     }
 
+    LANGFUSE_SECRET_KEY = SecretFileValue(
+        None, environ_name="LANGFUSE_SECRET_KEY", environ_prefix=None
+    )
+    LANGFUSE_PUBLIC_KEY = values.Value(
+        None, environ_name="LANGFUSE_PUBLIC_KEY", environ_prefix=None
+    )
+    LANGFUSE_BASE_URL = values.Value(
+        None, environ_name="LANGFUSE_BASE_URL", environ_prefix=None
+    )
+
     # Y provider microservice
-    Y_PROVIDER_API_KEY = values.Value(
+    Y_PROVIDER_API_KEY = SecretFileValue(
         environ_name="Y_PROVIDER_API_KEY",
         environ_prefix=None,
     )
@@ -527,9 +1056,28 @@ class Base(Configuration):
         environ_prefix=None,
     )
 
+    # DocSpec API microservice
+    DOCSPEC_API_URL = values.Value(environ_name="DOCSPEC_API_URL", environ_prefix=None)
+
+    # Imported file settings
+    CONVERSION_UPLOAD_ENABLED = values.BooleanValue(
+        False, environ_name="CONVERSION_UPLOAD_ENABLED", environ_prefix=None
+    )
+    CONVERSION_FILE_MAX_SIZE = values.IntegerValue(
+        default=DATA_UPLOAD_MAX_MEMORY_SIZE,
+        environ_name="CONVERSION_FILE_MAX_SIZE",
+        environ_prefix=None,
+    )
+
+    CONVERSION_FILE_EXTENSIONS_ALLOWED = values.ListValue(
+        default=[".docx", ".md"],
+        environ_name="CONVERSION_FILE_EXTENSIONS_ALLOWED",
+        environ_prefix=None,
+    )
+
     # Conversion endpoint
     CONVERSION_API_ENDPOINT = values.Value(
-        default="convert-markdown",
+        default="convert",
         environ_name="CONVERSION_API_ENDPOINT",
         environ_prefix=None,
     )
@@ -549,20 +1097,28 @@ class Base(Configuration):
         environ_prefix=None,
     )
 
+    DOCUMENT_NB_ACCESSES_CACHE_TIMEOUT = values.IntegerValue(
+        default=600,
+        environ_name="DOCUMENT_NB_ACCESSES_CACHE_TIMEOUT",
+        environ_prefix=None,
+    )
+
     # Logging
     # We want to make it easy to log to console but by default we log production
     # to Sentry and don't want to log to console.
     LOGGING = {
         "version": 1,
         "disable_existing_loggers": False,
+        "formatters": {
+            "simple": {
+                "format": "{asctime} {name} {levelname} {message}",
+                "style": "{",
+            },
+        },
         "handlers": {
             "console": {
                 "class": "logging.StreamHandler",
-                "level": values.Value(
-                    "ERROR",
-                    environ_name="LOGGING_LEVEL_HANDLERS_CONSOLE",
-                    environ_prefix=None,
-                ),
+                "formatter": "simple",
             },
         },
         # Override root logger to send it to console
@@ -580,10 +1136,231 @@ class Base(Configuration):
                     environ_name="LOGGING_LEVEL_LOGGERS_APP",
                     environ_prefix=None,
                 ),
-                "propagate": False,
+                "propagate": True,
+            },
+            "docs.security": {
+                "handlers": ["console"],
+                "level": values.Value(
+                    "INFO",
+                    environ_name="LOGGING_LEVEL_LOGGERS_SECURITY",
+                    environ_prefix=None,
+                ),
+                "propagate": True,
+            },
+            "request.summary": {
+                "level": values.Value(
+                    "WARNING",
+                    environ_name="LOGGING_LEVEL_REQUEST_SUMMARY",
+                    environ_prefix=None,
+                )
             },
         },
     }
+
+    MALWARE_DETECTION = {
+        "BACKEND": values.Value(
+            "lasuite.malware_detection.backends.dummy.DummyBackend",
+            environ_name="MALWARE_DETECTION_BACKEND",
+            environ_prefix=None,
+        ),
+        "PARAMETERS": values.DictValue(
+            default={
+                "callback_path": "core.malware_detection.malware_detection_callback",
+            },
+            environ_name="MALWARE_DETECTION_PARAMETERS",
+            environ_prefix=None,
+        ),
+    }
+
+    API_USERS_LIST_LIMIT = values.PositiveIntegerValue(
+        default=5,
+        environ_name="API_USERS_LIST_LIMIT",
+        environ_prefix=None,
+    )
+    API_USERS_SEARCH_QUERY_MIN_LENGTH = values.PositiveIntegerValue(
+        default=3,
+        environ_name="API_USERS_SEARCH_QUERY_MIN_LENGTH",
+        environ_prefix=None,
+    )
+
+    # Content Security Policy
+    # See https://content-security-policy.com/ for more information.
+    CONTENT_SECURITY_POLICY = {
+        "EXCLUDE_URL_PREFIXES": values.ListValue(
+            ["/admin"],
+            environ_name="CONTENT_SECURITY_POLICY_EXCLUDE_URL_PREFIXES",
+            environ_prefix=None,
+        ),
+        "DIRECTIVES": values.DictValue(
+            default={
+                "default-src": [NONE],
+                "script-src": [NONE],
+                "style-src": [NONE],
+                "img-src": [NONE],
+                "connect-src": [NONE],
+                "font-src": [NONE],
+                "object-src": [NONE],
+                "media-src": [NONE],
+                "frame-src": [NONE],
+                "child-src": [NONE],
+                "form-action": [NONE],
+                "frame-ancestors": [NONE],
+                "base-uri": [NONE],
+                "worker-src": [NONE],
+                "manifest-src": [NONE],
+                "prefetch-src": [NONE],
+            },
+            environ_name="CONTENT_SECURITY_POLICY_DIRECTIVES",
+            environ_prefix=None,
+        ),
+    }
+
+    # User accounts management
+    USER_RECONCILIATION_FORM_URL = values.Value(
+        None, environ_name="USER_RECONCILIATION_FORM_URL", environ_prefix=None
+    )
+    USER_ONBOARDING_DOCUMENTS = values.ListValue(
+        [], environ_name="USER_ONBOARDING_DOCUMENTS", environ_prefix=None
+    )
+    USER_ONBOARDING_SANDBOX_DOCUMENT = values.Value(
+        None, environ_name="USER_ONBOARDING_SANDBOX_DOCUMENT", environ_prefix=None
+    )
+    # Marketing and communication settings
+    SIGNUP_NEW_USER_TO_MARKETING_EMAIL = values.BooleanValue(
+        False,
+        environ_name="SIGNUP_NEW_USER_TO_MARKETING_EMAIL",
+        environ_prefix=None,
+        help_text=(
+            "When enabled, new users are automatically added to mailing list "
+            "for product updates, marketing communications, and customized emails. "
+        ),
+    )
+
+    LASUITE_MARKETING = {
+        "BACKEND": values.Value(
+            "lasuite.marketing.backends.dummy.DummyBackend",
+            environ_name="LASUITE_MARKETING_BACKEND",
+            environ_prefix=None,
+        ),
+        "PARAMETERS": values.DictValue(
+            default={},
+            environ_name="LASUITE_MARKETING_PARAMETERS",
+            environ_prefix=None,
+        ),
+    }
+
+    TREEBEARD_PATH_COMPUTE_RETRY_MAX_ATTEMPTS = values.IntegerValue(
+        10,
+        environ_name="TREEBEARD_PATH_COMPUTE_RETRY_MAX_ATTEMPTS",
+        environ_prefix=None,
+    )
+
+    # -- Profiling (django-silk) ---------------------------------------------
+    # Opt-in request/SQL/cProfile profiler, OFF by default. Turn it on in a
+    # given environment with SILK_ENABLED=1 (typically a throwaway staging pod
+    # loaded via `generate_volumetry`, or local dev) to record, per request,
+    # the SQL it ran with timing + originating stack, and an optional cProfile
+    # you can download as a binary `.prof`. When enabled, `silk` is appended to
+    # INSTALLED_APPS, `SilkyMiddleware` is wired near the top of MIDDLEWARE, and
+    # the UI is served at /silk/ (see impress/urls.py and post_setup below).
+    #
+    # NEVER enable against production with real users: silk persists request
+    # metadata to the database. Request/response BODIES are deliberately never
+    # stored (the two MAX_*_BODY_SIZE = 0 below) so document content, titles and
+    # emails cannot leak into the silk tables — only method, path, headers-free
+    # metadata, SQL and timings are kept.
+    SILK_ENABLED = values.BooleanValue(
+        False, environ_name="SILK_ENABLED", environ_prefix=None
+    )
+    # Per-request cProfile. Binary output lets you download a `.prof` and open
+    # it in snakeviz / pstats / tuna offline for a full call graph. The binary
+    # is written through the SILKY_STORAGE backend (S3, see STORAGES above), not
+    # the local filesystem, so it works on read-only/ephemeral pods.
+    SILKY_PYTHON_PROFILER = values.BooleanValue(
+        True, environ_name="SILK_PYTHON_PROFILER", environ_prefix=None
+    )
+    SILKY_PYTHON_PROFILER_BINARY = values.BooleanValue(
+        True, environ_name="SILK_PYTHON_PROFILER_BINARY", environ_prefix=None
+    )
+    # Under load, record only a sample of requests to bound silk's own overhead
+    # and storage (100 = every request; drop it for a thundering-herd repro).
+    SILKY_INTERCEPT_PERCENT = values.IntegerValue(
+        100, environ_name="SILK_INTERCEPT_PERCENT", environ_prefix=None
+    )
+    # Ring-buffer the stored requests so a long load run cannot fill the disk.
+    SILKY_MAX_RECORDED_REQUESTS = values.IntegerValue(
+        10000, environ_name="SILK_MAX_RECORDED_REQUESTS", environ_prefix=None
+    )
+    SILKY_MAX_RECORDED_REQUESTS_CHECK_PERCENT = 10
+    # Record silk's own per-request overhead so you can subtract it.
+    SILKY_META = True
+    # Lock the /silk/ UI behind an authenticated staff session.
+    SILKY_AUTHENTICATION = True
+    SILKY_AUTHORISATION = True
+    # RGPD: never persist request/response bodies (0 bytes kept).
+    SILKY_MAX_REQUEST_BODY_SIZE = 0
+    SILKY_MAX_RESPONSE_BODY_SIZE = 0
+
+    # -- Load-test tooling ---------------------------------------------------
+    # The `loadtest` application mints sessions for existing users, which is
+    # what lets a load generator act as thousands of them without going through
+    # the OIDC login. It is not in INSTALLED_APPS: only the `LoadTest`
+    # configuration below installs it and turns this on. Deliberately not read
+    # from the environment — no variable can enable it on another configuration —
+    # and pinned to False again in `Production`, which every deployed
+    # configuration inherits from.
+    LOAD_TEST_TOOLS_ENABLED = False
+
+    # -- Metrics (django-prometheus) -----------------------------------------
+    # Opt-in Prometheus instrumentation, OFF by default. When enabled,
+    # `django_prometheus` is added to INSTALLED_APPS and its two middlewares
+    # wrap MIDDLEWARE (see setup_prometheus_metrics below) to count and time
+    # every request, labelled by view name, method and status — never by path,
+    # user or document, so no identifier leaves the application through a label.
+    #
+    # The metrics are served on /metrics, outside of /api/ so that the ingress
+    # of the application does not publish them: a deployment that wants them
+    # reachable from outside routes that path on purpose, and filters who may
+    # call it. Whoever reaches it still has to present PROMETHEUS_API_KEY as a
+    # bearer token (core.middleware.PrometheusAuthMiddleware), and the
+    # application refuses to start with the metrics enabled and no key.
+    PROMETHEUS_METRICS_ENABLED = values.BooleanValue(
+        False, environ_name="PROMETHEUS_METRICS_ENABLED", environ_prefix=None
+    )
+    PROMETHEUS_API_KEY = SecretFileValue(
+        None, environ_name="PROMETHEUS_API_KEY", environ_prefix=None
+    )
+    # Let /metrics be scraped over plain http where SECURE_SSL_REDIRECT is on,
+    # i.e. take it out of the redirect to https the way the probes are. For a
+    # scraper that reaches the process itself, past the proxy terminating TLS
+    # — a Prometheus inside a kubernetes cluster calling the pods. Leave it off
+    # when the application is reached directly: the redirect is then what keeps
+    # the bearer token off the wire in clear.
+    PROMETHEUS_METRICS_SSL_REDIRECT_EXEMPT = values.BooleanValue(
+        False,
+        environ_name="PROMETHEUS_METRICS_SSL_REDIRECT_EXEMPT",
+        environ_prefix=None,
+    )
+    # Also count and time the SQL queries, by swapping the database engine for
+    # django-prometheus' instrumented subclass of it.
+    PROMETHEUS_DB_METRICS_ENABLED = values.BooleanValue(
+        True, environ_name="PROMETHEUS_DB_METRICS_ENABLED", environ_prefix=None
+    )
+    # Report the length of the Celery queue on /metrics. It is asked to the
+    # broker at every scrape, by whichever replica answers it.
+    PROMETHEUS_CELERY_QUEUE_METRICS_ENABLED = values.BooleanValue(
+        True,
+        environ_name="PROMETHEUS_CELERY_QUEUE_METRICS_ENABLED",
+        environ_prefix=None,
+    )
+    # uvicorn runs several worker processes, and a scrape is answered by one of
+    # them: they all write their numbers to this directory so that whichever
+    # answers can add them up. It has to be the same for every worker, hence a
+    # fixed default rather than a random one. Defaults to a directory of the
+    # system's temporary directory, named after the user running the application.
+    PROMETHEUS_MULTIPROC_DIR = values.Value(
+        None, environ_name="PROMETHEUS_MULTIPROC_DIR", environ_prefix=None
+    )
 
     # pylint: disable=invalid-name
     @property
@@ -616,6 +1393,72 @@ class Base(Configuration):
         }
 
     @classmethod
+    def setup_prometheus_metrics(cls):
+        """Wire django-prometheus into the settings (PROMETHEUS_METRICS_ENABLED)."""
+        if not cls.PROMETHEUS_API_KEY:
+            # fail closed: without a key the endpoint would answer to anybody
+            raise ValueError(
+                "PROMETHEUS_METRICS_ENABLED requires PROMETHEUS_API_KEY to be set."
+            )
+
+        # prometheus_client decides whether the workers share their numbers
+        # when it is first imported, by looking for this variable in the
+        # environment of the process: a setting alone would come too late.
+        multiproc_dir = cls.PROMETHEUS_MULTIPROC_DIR or os.path.join(
+            tempfile.gettempdir(), f"impress-prometheus-{os.getuid()}"
+        )
+        try:
+            os.makedirs(multiproc_dir, mode=0o700, exist_ok=True)
+            stat_result = os.lstat(multiproc_dir)
+        except OSError as error:
+            raise ValueError(
+                f"PROMETHEUS_MULTIPROC_DIR ({multiproc_dir}) cannot be created: {error}"
+            ) from error
+        # A shared temporary directory is writable by every local user: refuse a
+        # directory somebody else prepared, or a link to somewhere else.
+        if not stat.S_ISDIR(stat_result.st_mode) or stat_result.st_uid != os.getuid():
+            raise ValueError(
+                f"PROMETHEUS_MULTIPROC_DIR ({multiproc_dir}) must be a directory "
+                "owned by the user running the application."
+            )
+        cls.PROMETHEUS_MULTIPROC_DIR = multiproc_dir
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir
+
+        # Edited in place, like silk above: post_setup runs once the settings
+        # have been handed to Django, which only sees an assignment made
+        # here through the objects it already holds.
+        if "django_prometheus" not in cls.INSTALLED_APPS:
+            cls.INSTALLED_APPS.append("django_prometheus")
+        # The measuring middlewares go first and last, so that the time spent in
+        # every other middleware is part of what is measured. The authentication
+        # goes before them all: a refused scrape costs nothing and touches
+        # neither the session store nor the database.
+        auth = "core.middleware.PrometheusAuthMiddleware"
+        before = "django_prometheus.middleware.PrometheusBeforeMiddleware"
+        after = "django_prometheus.middleware.PrometheusAfterMiddleware"
+        if before not in cls.MIDDLEWARE:
+            cls.MIDDLEWARE.insert(0, before)
+            cls.MIDDLEWARE.insert(0, auth)
+            cls.MIDDLEWARE.append(after)
+
+        default_database = cls.DATABASES["default"]
+        if (
+            cls.PROMETHEUS_DB_METRICS_ENABLED
+            and default_database.get("ENGINE") == "django.db.backends.postgresql"
+        ):
+            default_database["ENGINE"] = "django_prometheus.db.backends.postgresql"
+
+        # in place, like the lists above: a reassignment would go unseen. The
+        # path is core.middleware.METRICS_PATH, not imported here: the settings
+        # are read before the applications are.
+        metrics_pattern = "^metrics$"
+        if (
+            cls.PROMETHEUS_METRICS_SSL_REDIRECT_EXEMPT
+            and metrics_pattern not in cls.SECURE_REDIRECT_EXEMPT
+        ):
+            cls.SECURE_REDIRECT_EXEMPT.append(metrics_pattern)
+
+    @classmethod
     def post_setup(cls):
         """Post setup configuration.
         This is the place where you can configure settings that require other
@@ -629,10 +1472,19 @@ class Base(Configuration):
                 dsn=cls.SENTRY_DSN,
                 environment=cls.__name__.lower(),
                 release=get_release(),
-                integrations=[DjangoIntegration()],
+                traces_sample_rate=cls.SENTRY_TRACES_SAMPLE_RATE,
+                integrations=[
+                    DjangoIntegration(
+                        transaction_style="url",
+                        middleware_spans=True,
+                        cache_spans=True,
+                    )
+                ],
             )
-            with sentry_sdk.configure_scope() as scope:
-                scope.set_extra("application", "backend")
+            sentry_sdk.set_tag("application", "backend")
+
+            # Ignore the logs added by the DockerflowMiddleware
+            ignore_logger("request.summary")
 
         if (
             cls.OIDC_FALLBACK_TO_EMAIL_FOR_IDENTIFICATION
@@ -642,6 +1494,75 @@ class Base(Configuration):
                 "Both OIDC_FALLBACK_TO_EMAIL_FOR_IDENTIFICATION and "
                 "OIDC_ALLOW_DUPLICATE_EMAILS cannot be set to True simultaneously. "
             )
+
+        psycopg_pool_enabled = values.BooleanValue(
+            False, environ_name="DB_PSYCOPG_POOL_ENABLED", environ_prefix=""
+        )
+
+        if psycopg_pool_enabled:
+            cls.DATABASES["default"].update(
+                {
+                    "OPTIONS": {
+                        # https://www.psycopg.org/psycopg3/docs/api/pool.html#psycopg_pool.ConnectionPool
+                        "pool": {
+                            "min_size": values.IntegerValue(
+                                4,
+                                environ_name="DB_PSYCOPG_POOL_MIN_SIZE",
+                                environ_prefix=None,
+                            ),
+                            "max_size": values.IntegerValue(
+                                None,
+                                environ_name="DB_PSYCOPG_POOL_MAX_SIZE",
+                                environ_prefix=None,
+                            ),
+                            "timeout": values.IntegerValue(
+                                3,
+                                environ_name="DB_PSYCOPG_POOL_TIMEOUT",
+                                environ_prefix=None,
+                            ),
+                        }
+                    },
+                }
+            )
+
+        if cls.OPENAI_SDK_API_KEY and cls.MISTRAL_SDK_API_KEY:
+            raise ValueError(
+                "Both OPENAI_SDK and MISTRAL_SDK parameters can not be set simultaneously."
+            )
+
+        # a batch of nothing would walk no subtree and never end
+        if cls.YHUB_RESET_CONNECTIONS_BATCH_SIZE < 1:
+            raise ValueError("YHUB_RESET_CONNECTIONS_BATCH_SIZE must be at least 1.")
+
+        # every browser on the http fallback authorizes each poll against the backend:
+        # a few milliseconds, or seconds typed as milliseconds, would flood it
+        if cls.COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL < 5000:
+            raise ValueError(
+                "COLLABORATION_HTTP_FALLBACK_SYNC_INTERVAL must be at least 5000 "
+                "(milliseconds)."
+            )
+
+        if cls.POSTHOG_KEY is not None:
+            posthog.api_key = cls.POSTHOG_KEY
+            posthog.host = cls.POSTHOG_HOST
+
+        if cls.SILK_ENABLED:
+            # Activate django-silk only when explicitly turned on for this
+            # environment. Appending here (rather than in INSTALLED_APPS) keeps
+            # silk absent from every environment that does not opt in, including
+            # production. Guards make re-entry (post_setup can run per subclass)
+            # idempotent.
+            if "silk" not in cls.INSTALLED_APPS:
+                cls.INSTALLED_APPS.append("silk")
+            # SilkyMiddleware must be high enough to time the whole request but
+            # after AuthenticationMiddleware so it can attribute request.user;
+            # process_response runs inner-to-outer, so index 1 (just after
+            # SecurityMiddleware) satisfies both.
+            if "silk.middleware.SilkyMiddleware" not in cls.MIDDLEWARE:
+                cls.MIDDLEWARE.insert(1, "silk.middleware.SilkyMiddleware")
+
+        if cls.PROMETHEUS_METRICS_ENABLED:
+            cls.setup_prometheus_metrics()
 
 
 class Build(Base):
@@ -658,7 +1579,7 @@ class Build(Base):
         },
         "staticfiles": {
             "BACKEND": values.Value(
-                "whitenoise.storage.CompressedManifestStaticFilesStorage",
+                "servestatic.storage.CompressedManifestStaticFilesStorage",
                 environ_name="STORAGES_STATICFILES_BACKEND",
             ),
         },
@@ -674,16 +1595,47 @@ class Development(Base):
 
     ALLOWED_HOSTS = ["*"]
     CORS_ALLOW_ALL_ORIGINS = True
-    CSRF_TRUSTED_ORIGINS = ["http://localhost:8072", "http://localhost:3000"]
+    CSRF_TRUSTED_ORIGINS = values.ListValue(
+        ["http://localhost:8072", "http://localhost:3000"],
+        environ_name="DJANGO_CSRF_TRUSTED_ORIGINS",
+        environ_prefix=None,
+    )
+    CORS_ALLOW_HEADERS = (
+        *default_headers,
+        "if-none-match",
+        "if-modified-since",
+    )
+    CORS_EXPOSE_HEADERS = ["ETag"]
     DEBUG = True
 
-    SESSION_COOKIE_NAME = "impress_sessionid"
-
     USE_SWAGGER = True
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": values.Value(
+                "redis://redis:6379/2",
+                environ_name="REDIS_URL",
+                environ_prefix=None,
+            ),
+            "TIMEOUT": values.IntegerValue(
+                30,  # timeout in seconds
+                environ_name="CACHES_DEFAULT_TIMEOUT",
+                environ_prefix=None,
+            ),
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            },
+        },
+    }
 
     def __init__(self):
         # pylint: disable=invalid-name
         self.INSTALLED_APPS += ["django_extensions", "drf_spectacular_sidecar"]
+        self.CONTENT_SECURITY_POLICY["EXCLUDE_URL_PREFIXES"] += [
+            f"/api/{self.API_VERSION}/swagger",
+            f"/api/{self.API_VERSION}/redoc",
+            "/silk",
+        ]
 
 
 class Test(Base):
@@ -693,8 +1645,23 @@ class Test(Base):
         "django.contrib.auth.hashers.MD5PasswordHasher",
     ]
     USE_SWAGGER = True
+    # Static files are not used in the test environment
+    # Tests are raising warnings because the /data/static directory does not exist
+    STATIC_ROOT = None
 
     CELERY_TASK_ALWAYS_EAGER = values.BooleanValue(True)
+
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+        },
+        "staticfiles": {
+            "BACKEND": values.Value(
+                "servestatic.storage.CompressedStaticFilesStorage",
+                environ_name="STORAGES_STATICFILES_BACKEND",
+            ),
+        },
+    }
 
     def __init__(self):
         # pylint: disable=invalid-name
@@ -745,6 +1712,9 @@ class Production(Base):
     SECURE_HSTS_PRELOAD = True
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_SSL_REDIRECT = True
+    # The probes are called on the process itself, over plain http: a redirect
+    # to https is a probe that fails. /metrics joins them only with
+    # PROMETHEUS_METRICS_SSL_REDIRECT_EXEMPT, see setup_prometheus_metrics
     SECURE_REDIRECT_EXEMPT = [
         "^__lbheartbeat__",
         "^__heartbeat__",
@@ -753,20 +1723,86 @@ class Production(Base):
     # Modern browsers require to have the `secure` attribute on cookies with `Samesite=none`
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_SECURE = True
+    SESSION_CACHE_ALIAS = "session"
+
+    # Never in production: sessions are only minted for a load test, with the
+    # `LoadTest` configuration. Everything that tooling adds is switched off
+    # here explicitly, whatever the defaults of `Base` become.
+    LOAD_TEST_TOOLS_ENABLED = False
 
     # Privacy
     SECURE_REFERRER_POLICY = "same-origin"
 
+    # Conversion API: Always verify SSL in production
+    CONVERSION_API_SECURE = True
+
+    # Cache
     CACHES = {
         "default": {
             "BACKEND": "django_redis.cache.RedisCache",
             "LOCATION": values.Value(
-                "redis://redis:6379/1",
+                "redis://redis:6379/0",
                 environ_name="REDIS_URL",
+                environ_prefix=None,
+            ),
+            "TIMEOUT": values.IntegerValue(
+                30,  # timeout in seconds
+                environ_name="CACHES_DEFAULT_TIMEOUT",
                 environ_prefix=None,
             ),
             "OPTIONS": {
                 "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "SOCKET_CONNECT_TIMEOUT": values.FloatValue(
+                    default=0.5,
+                    environ_name="CACHES_DEFAULT_SOCKET_CONNECT_TIMEOUT",
+                    environ_prefix=None,
+                ),
+                "SOCKET_TIMEOUT": values.FloatValue(
+                    default=1,
+                    environ_name="CACHES_DEFAULT_SOCKET_TIMEOUT",
+                    environ_prefix=None,
+                ),
+                "IGNORE_EXCEPTIONS": values.BooleanValue(
+                    default=True,
+                    environ_name="CACHES_DEFAULT_IGNORE_EXCEPTIONS",
+                    environ_prefix=None,
+                ),
+            },
+            "KEY_PREFIX": values.Value(
+                "docs",
+                environ_name="CACHES_DEFAULT_KEY_PREFIX",
+                environ_prefix=None,
+            ),
+        },
+        "session": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": values.Value(
+                "redis://redis:6379/0",
+                environ_name="REDIS_URL",
+                environ_prefix=None,
+            ),
+            "TIMEOUT": values.IntegerValue(
+                30,  # timeout in seconds
+                environ_name="CACHES_SESSION_TIMEOUT",
+                environ_prefix=None,
+            ),
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "SOCKET_CONNECT_TIMEOUT": values.FloatValue(
+                    default=0.5,
+                    environ_name="CACHES_SESSION_SOCKET_CONNECT_TIMEOUT",
+                    environ_prefix=None,
+                ),
+                "SOCKET_TIMEOUT": values.FloatValue(
+                    default=1,
+                    environ_name="CACHES_SESSION_SOCKET_TIMEOUT",
+                    environ_prefix=None,
+                ),
+                "IGNORE_EXCEPTIONS": values.BooleanValue(
+                    default=False,
+                    environ_name="CACHES_SESSION_IGNORE_EXCEPTIONS",
+                    environ_prefix=None,
+                ),
             },
         },
     }
@@ -794,6 +1830,22 @@ class PreProduction(Production):
 
     nota bene: it should inherit from the Production environment.
     """
+
+
+class LoadTest(Production):
+    """
+    Load-test environment settings: a production-like deployment, on anonymised
+    data, that a load generator can log into.
+
+    It is `Production` plus the `loadtest` application, whose commands mint
+    sessions for existing users (see `documentation/stress-test-plan.md`). Select
+    it with DJANGO_CONFIGURATION=LoadTest, and never on an instance holding real
+    users: anybody able to run a command there can act as any of them.
+    """
+
+    LOAD_TEST_TOOLS_ENABLED = True
+    # a list of its own: the one of `Base` is shared by every configuration
+    INSTALLED_APPS = [*Production.INSTALLED_APPS, "loadtest"]
 
 
 class Demo(Production):

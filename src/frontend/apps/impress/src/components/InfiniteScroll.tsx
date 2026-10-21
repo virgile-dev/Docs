@@ -1,4 +1,4 @@
-import { Button } from '@openfun/cunningham-react';
+import { Button } from '@gouvfr-lasuite/ui-components';
 import { PropsWithChildren } from 'react';
 import { useTranslation } from 'react-i18next';
 import { InView } from 'react-intersection-observer';
@@ -30,16 +30,23 @@ export const InfiniteScroll = ({
   };
 
   return (
-    <Box {...boxProps}>
+    <Box
+      {...boxProps}
+      className={`--docs--infinite-scroll ${boxProps.className || ''}`}
+    >
       {children}
       <InView onChange={loadMore}>
         {!isLoading && hasMore && (
           <Button
             onClick={() => void next()}
-            color="primary-text"
+            color="brand"
+            variant="bordered"
             icon={<Icon iconName="arrow_downward" />}
           >
-            {buttonLabel ?? t('Load more')}
+            {buttonLabel ??
+              t('Load more', {
+                description: 'Button to load the next items of a list',
+              })}
           </Button>
         )}
       </InView>

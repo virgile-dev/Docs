@@ -6,48 +6,74 @@ import {
   useState,
 } from 'react';
 import { Button, Popover } from 'react-aria-components';
-import styled from 'styled-components';
+import styled, { css } from 'styled-components';
+
+import { useCunninghamTheme } from '@/cunningham';
+import { useFocusStore } from '@/stores';
+
+import { BoxProps } from './Box';
 
 const StyledPopover = styled(Popover)`
-  background-color: white;
-  border-radius: 4px;
-  box-shadow: 1px 1px 5px rgba(0, 0, 0, 0.1);
-
-  border: 1px solid #dddddd;
-
-  transition: opacity 0.2s ease-in-out;
+  background-color: var(--c--contextuals--background--surface--primary);
+  border-radius: var(--c--globals--spacings--st);
+  box-shadow: 0 0 6px 0 rgba(0, 0, 145, 0.1);
+  border: 1px solid var(--c--contextuals--border--surface--primary);
+  transition: opacity var(--c--globals--transitions--duration)
+    var(--c--globals--transitions--ease-out);
 `;
 
-const StyledButton = styled(Button)`
+interface StyledButtonProps {
+  $css?: BoxProps['$css'];
+}
+const StyledButton = styled(Button)<StyledButtonProps>`
   cursor: pointer;
   border: none;
   background: none;
   outline: none;
-  transition: all 0.2s ease-in-out;
-  font-family: Marianne, Arial, serif;
-  font-weight: 500;
-  font-size: 0.938rem;
-  padding: 0;
-  text-wrap: nowrap;
+  font-weight: var(--c--components--button--font-weight);
+  font-size: var(--c--components--button--medium-font-size);
+  padding: var(--c--globals--spacings--0);
+  border-radius: var(--c--globals--spacings--st);
+  color: var(--c--contextuals--content--semantic--brand--tertiary);
+  &:hover {
+    background-color: var(
+      --c--contextuals--background--semantic--contextual--primary
+    );
+  }
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--c--globals--colors--brand-400);
+    background-color: var(
+      --c--contextuals--background--semantic--brand--tertiary-hover
+    );
+    border-radius: var(--c--globals--spacings--st);
+  }
+  ${({ $css }) => $css};
 `;
 
 export interface DropButtonProps {
   button: ReactNode;
+  buttonCss?: BoxProps['$css'];
   isOpen?: boolean;
   onOpenChange?: (isOpen: boolean) => void;
   label?: string;
+  testId?: string;
 }
 
 export const DropButton = ({
   button,
+  buttonCss,
   isOpen = false,
   onOpenChange,
   children,
   label,
+  testId,
 }: PropsWithChildren<DropButtonProps>) => {
+  const { themeTokens } = useCunninghamTheme();
+  const font = themeTokens['font']?.['families']['base'];
   const [isLocalOpen, setIsLocalOpen] = useState(isOpen);
+  const addLastFocus = useFocusStore((state) => state.addLastFocus);
 
-  const triggerRef = useRef(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     setIsLocalOpen(isOpen);
@@ -62,8 +88,19 @@ export const DropButton = ({
     <>
       <StyledButton
         ref={triggerRef}
-        onPress={() => onOpenChangeHandler(true)}
+        onPress={() => {
+          addLastFocus(triggerRef.current);
+          onOpenChangeHandler(true);
+        }}
         aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={isLocalOpen}
+        data-testid={testId}
+        $css={css`
+          font-family: ${font};
+          ${buttonCss};
+        `}
+        className="--docs--drop-button"
       >
         {button}
       </StyledButton>
@@ -72,6 +109,7 @@ export const DropButton = ({
         triggerRef={triggerRef}
         isOpen={isLocalOpen}
         onOpenChange={onOpenChangeHandler}
+        className="--docs--drop-button-popover"
       >
         {children}
       </StyledPopover>

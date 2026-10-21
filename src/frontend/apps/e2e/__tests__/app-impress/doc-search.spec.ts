@@ -1,114 +1,279 @@
 import { expect, test } from '@playwright/test';
-import { DateTime } from 'luxon';
 
-import { createDoc, verifyDocName } from './common';
-
-type SmallDoc = {
-  id: string;
-  title: string;
-  updated_at: string;
-};
+import { createDoc, verifyDocName } from './utils-common';
+import { connectOtherUserToDoc, updateShareLink } from './utils-share';
+import {
+  createRootSubPage,
+  navigateToTopParentFromTree,
+} from './utils-sub-pages';
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
 
 test.describe('Document search', () => {
-  test('it checks all elements are visible', async ({ page }) => {
-    await page.getByRole('button', { name: 'search' }).click();
-    await expect(
-      page.getByRole('img', { name: 'No active search' }),
-    ).toBeVisible();
-
-    await expect(
-      page.getByLabel('Search modal').getByText('search'),
-    ).toBeVisible();
-
-    await expect(
-      page.getByPlaceholder('Type the name of a document'),
-    ).toBeVisible();
-  });
-
-  test('it checks search for a document', async ({ page, browserName }) => {
-    const id = Math.random().toString(36).substring(7);
-
-    const doc1 = await createDoc(page, `My super ${id} doc`, browserName, 1);
-    await verifyDocName(page, doc1[0]);
-    await page.goto('/');
-    const doc2 = await createDoc(
+  test('it searches documents', async ({ page, browserName }) => {
+    const [doc1Title] = await createDoc(
       page,
-      `My super ${id} very doc`,
+      'My doc search super',
       browserName,
       1,
     );
-    await verifyDocName(page, doc2[0]);
+    await verifyDocName(page, doc1Title);
     await page.goto('/');
-    await page.getByRole('button', { name: 'search' }).click();
-    await page.getByPlaceholder('Type the name of a document').click();
-    await page
-      .getByPlaceholder('Type the name of a document')
-      .fill(`My super ${id}`);
 
-    let responsePromisePage = page.waitForResponse(
-      (response) =>
-        response.url().includes(`/documents/?page=1&title=My+super+${id}`) &&
-        response.status() === 200,
+    const [doc2Title] = await createDoc(
+      page,
+      'My doc search doc',
+      browserName,
+      1,
     );
-    let response = await responsePromisePage;
-    let result = (await response.json()) as { results: SmallDoc[] };
-    let docs = result.results;
-    expect(docs.length).toEqual(2);
-
-    await Promise.all(
-      docs.map(async (doc: SmallDoc) => {
-        await expect(
-          page.getByTestId(`doc-search-item-${doc.id}`),
-        ).toBeVisible();
-        const updatedAt = DateTime.fromISO(doc.updated_at ?? DateTime.now())
-          .setLocale('en')
-          .toRelative();
-        await expect(
-          page.getByTestId(`doc-search-item-${doc.id}`).getByText(updatedAt!),
-        ).toBeVisible();
-      }),
-    );
-
-    const firstDoc = docs[0];
+    await verifyDocName(page, doc2Title);
+    await page.goto('/');
+    await page.getByTestId('search-docs-button').click();
 
     await expect(
-      page
-        .getByTestId(`doc-search-item-${firstDoc.id}`)
-        .getByText('keyboard_return'),
+      page.getByRole('listbox', { name: 'Suggestions' }).locator('img'),
     ).toBeVisible();
 
-    await page
-      .getByPlaceholder('Type the name of a document')
-      .press('ArrowDown');
-
-    const secondDoc = docs[1];
     await expect(
-      page
-        .getByTestId(`doc-search-item-${secondDoc.id}`)
-        .getByText('keyboard_return'),
+      page.getByRole('heading', { name: 'Search for a document' }),
     ).toBeVisible();
 
-    await page.getByPlaceholder('Type the name of a document').click();
-    await page
-      .getByPlaceholder('Type the name of a document')
-      .fill(`My super ${id} doc`);
+    const inputSearch = page.getByPlaceholder('Type the name of a document');
 
-    responsePromisePage = page.waitForResponse(
-      (response) =>
-        response
-          .url()
-          .includes(`/documents/?page=1&title=My+super+${id}+doc`) &&
-        response.status() === 200,
+    await inputSearch.click();
+    await inputSearch.fill('My doc search');
+    await inputSearch.press('ArrowDown');
+
+    const listSearch = page.getByRole('listbox').getByRole('group');
+    const rowdoc = listSearch.getByRole('option').first();
+    await expect(rowdoc.getByText(/just now/)).toBeVisible();
+
+    await expect(
+      listSearch.getByRole('option').getByText(doc1Title),
+    ).toBeVisible();
+    await expect(
+      listSearch.getByRole('option').getByText(doc2Title),
+    ).toBeVisible();
+
+    await inputSearch.fill('My doc search super');
+
+    await expect(
+      listSearch.getByRole('option').getByText(doc1Title),
+    ).toBeVisible();
+
+    await expect(
+      listSearch.getByRole('option').getByText(doc2Title),
+    ).toBeHidden();
+  });
+
+  test('it opens a search result in a new tab with ctrl+click', async ({
+    page,
+    browserName,
+  }) => {
+    const [docTitle] = await createDoc(
+      page,
+      'My doc search new tab',
+      browserName,
+      1,
+    );
+    await verifyDocName(page, docTitle);
+    await page.goto('/');
+    await page.getByTestId('search-docs-button').click();
+
+    const inputSearch = page.getByPlaceholder('Type the name of a document');
+    await inputSearch.fill(docTitle);
+
+    const result = page
+      .getByRole('listbox')
+      .getByRole('group')
+      .getByRole('option')
+      .getByText(docTitle);
+    await expect(result).toBeVisible();
+
+    const [newPage] = await Promise.all([
+      page.context().waitForEvent('page'),
+      result.click({ modifiers: ['ControlOrMeta'] }),
+    ]);
+
+    await verifyDocName(newPage, docTitle);
+
+    // The search stays open in the first tab
+    await expect(
+      page.getByRole('heading', { name: 'Search for a document' }),
+    ).toBeVisible();
+    await expect(result).toBeVisible();
+    await newPage.close();
+
+    // A plain click still opens the document in the current tab
+    await result.click();
+    await verifyDocName(page, docTitle);
+    await expect(
+      page.getByRole('heading', { name: 'Search for a document' }),
+    ).toBeHidden();
+  });
+
+  test('it checks cmd+k modal search interaction', async ({
+    page,
+    browserName,
+  }) => {
+    const [doc1Title] = await createDoc(
+      page,
+      'Doc seack ctrl k',
+      browserName,
+      1,
+    );
+    await verifyDocName(page, doc1Title);
+
+    await page.keyboard.press('Control+k');
+    await expect(
+      page.getByRole('heading', { name: 'Search for a document' }),
+    ).toBeVisible();
+
+    await page.keyboard.press('Escape');
+
+    const editor = page.locator('.ProseMirror');
+    await editor.click();
+    await editor.fill('Hello world');
+    await editor.getByText('Hello world').selectText();
+
+    await page.keyboard.press('Control+k');
+    await expect(page.getByRole('textbox', { name: 'Edit URL' })).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: 'Search for a document' }),
+    ).toBeHidden();
+  });
+
+  test('it searches sub pages', async ({ page, browserName }) => {
+    // First doc
+    const [firstDocTitle] = await createDoc(
+      page,
+      'My first sub page search',
+      browserName,
+      1,
+    );
+    await verifyDocName(page, firstDocTitle);
+
+    // Create a new doc - for the moment without children
+    const [secondDocTitle] = await createDoc(
+      page,
+      'My second sub page search',
+      browserName,
+      1,
     );
 
-    response = await responsePromisePage;
-    result = (await response.json()) as { results: SmallDoc[] };
-    docs = result.results;
+    const searchButton = page.getByTestId('search-docs-button');
 
-    expect(docs.length).toEqual(1);
+    await searchButton.click();
+    await page
+      .getByRole('combobox', { name: 'Type the name of a document' })
+      .fill('sub page');
+
+    // Expect to find the first and second docs in the results list
+    const resultsList = page.getByRole('listbox');
+    await expect(
+      resultsList.getByRole('option', { name: firstDocTitle }),
+    ).toBeVisible();
+    await expect(
+      resultsList.getByRole('option', { name: secondDocTitle }),
+    ).toBeVisible();
+
+    await page.getByRole('button', { name: 'close' }).click();
+
+    // Create a sub page
+    const { name: secondChildDocTitle } = await createRootSubPage(
+      page,
+      browserName,
+      'My second sub page search - Child doc',
+    );
+    await searchButton.click();
+    await page
+      .getByRole('combobox', { name: 'Type the name of a document' })
+      .fill('sub page');
+
+    // Display only current doc results
+    const updatedResultsList = page.getByRole('listbox');
+    // Top parent are not displayed - only children
+    await expect(
+      updatedResultsList.getByRole('option', { name: secondDocTitle }),
+    ).toBeHidden();
+    await expect(
+      updatedResultsList.getByRole('option', { name: secondChildDocTitle }),
+    ).toBeVisible();
+    // Breadcrumb not displayed
+    await expect(
+      updatedResultsList
+        .getByRole('option', { name: secondChildDocTitle })
+        .getByText(secondDocTitle),
+    ).toBeHidden();
+    await expect(
+      updatedResultsList.getByRole('option', { name: firstDocTitle }),
+    ).toBeHidden();
+
+    // Click on the filter to show all docs
+    await page
+      .getByRole('switch', { name: 'Search in all documents' })
+      .getByText('All docs')
+      .click();
+
+    // Expect to see all docs in the results list
+    await expect(
+      updatedResultsList.getByRole('option', { name: firstDocTitle }),
+    ).toBeVisible();
+    await expect(
+      updatedResultsList.getByRole('option', { name: secondDocTitle }),
+    ).toBeVisible();
+    await expect(
+      updatedResultsList.getByRole('option', { name: secondChildDocTitle }),
+    ).toBeVisible();
+    // Breadcrumb with top parent is displayed
+    await expect(
+      updatedResultsList
+        .getByRole('option', { name: secondChildDocTitle })
+        .getByText(secondDocTitle),
+    ).toBeVisible();
+
+    await page.getByRole('button', { name: 'close' }).click();
+
+    // Navigate to the top parent doc and make it public
+    await navigateToTopParentFromTree({ page });
+    await verifyDocName(page, secondDocTitle);
+    await page.locator('[data-test="share-button"]').click();
+    await updateShareLink(page, 'Public');
+    await page.getByRole('button', { name: 'close' }).click();
+
+    const docUrl = page.url();
+
+    // Another unauthenticated should be able to search in the current doc
+    const { otherPage, cleanup } = await connectOtherUserToDoc({
+      browserName,
+      docUrl,
+      docTitle: secondDocTitle,
+      withoutSignIn: true,
+    });
+
+    await otherPage.getByTestId('search-docs-button').click();
+    await otherPage
+      .getByRole('combobox', { name: 'Type the name of a document' })
+      .fill('sub page');
+
+    // Search only in the current doc
+    const otherPageResultsList = otherPage.getByRole('listbox');
+    await expect(
+      otherPageResultsList.getByRole('option', { name: secondDocTitle }),
+    ).toBeHidden();
+    await expect(
+      otherPageResultsList.getByRole('option', { name: secondChildDocTitle }),
+    ).toBeVisible();
+    await expect(
+      otherPageResultsList.getByRole('option', { name: firstDocTitle }),
+    ).toBeHidden();
+
+    // Filter is not displayed because the user is not connected
+    const otherPageFilters = otherPage.getByTestId('doc-search-filters');
+    await expect(otherPageFilters).toBeHidden();
+
+    await cleanup();
   });
 });

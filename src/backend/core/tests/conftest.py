@@ -1,12 +1,96 @@
 """Fixtures for tests in the impress core application"""
 
+import base64
+from contextlib import contextmanager
 from unittest import mock
 
+from django.core.cache import cache
+from django.db import transaction
+
 import pytest
+import responses
+
+from core import factories
+from core.services.yhub_services import YHubService
+from core.tasks.access import PENDING_RESETS_ATTRIBUTE
+from core.tests.utils.urls import reload_urls, restore_urls
 
 USER = "user"
 TEAM = "team"
 VIA = [USER, TEAM]
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Fixture to clear the cache before each test."""
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def restore_urlconf():
+    """
+    Put the URLs back after a test that reloaded them.
+
+    Reloading is how a test makes the resource server routes appear or checks
+    that they are absent, but the URLconf belongs to the process: without this,
+    a test asserting a 404 on `/external_api/` and one asserting a 401 pass or
+    fail depending on which ran first in their worker.
+
+    Autouse and asking for nothing, so it is set up before the `settings`
+    fixture and torn down after it: the reload then sees the settings of the
+    project, not the ones of the test.
+    """
+    yield
+
+    restore_urls()
+
+
+@pytest.fixture(autouse=True, name="mock_reset_service_connections")
+def mock_reset_service_connections_fixture():
+    """
+    Take the resets of connections queued for the collaboration server.
+
+    Every change of an access queues one, at the commit of the transaction: in
+    a transactional test the Celery task would then run inline and reach for
+    the collaboration server. What was queued is checked on this mock, once
+    the callbacks on commit have run (`django_capture_on_commit_callbacks`).
+    """
+    with mock.patch(
+        "core.tasks.access.reset_service_connections_in_cascade.delay"
+    ) as mock_delay:
+        yield mock_delay
+
+
+@pytest.fixture(name="capture_service_resets")
+def capture_service_resets_fixture(
+    mock_reset_service_connections, django_capture_on_commit_callbacks
+):
+    """
+    Provide a context manager taking the resets queued by what runs in it.
+
+    The resets of a transaction are coalesced and sent on commit, and a test
+    runs whole in one transaction: what its setup queued is forgotten first,
+    then the callbacks queued on commit by the block are run, and the resets
+    they send are on the mock this yields.
+    """
+
+    @contextmanager
+    def _capture_service_resets():
+        setattr(transaction.get_connection(), PENDING_RESETS_ATTRIBUTE, None)
+        mock_reset_service_connections.reset_mock()
+        with django_capture_on_commit_callbacks(execute=True):
+            yield mock_reset_service_connections
+
+    return _capture_service_resets
+
+
+@pytest.fixture(autouse=True, name="mock_delete_service_documents")
+def mock_delete_service_documents_fixture():
+    """Take the deletions of documents queued for the collaboration server, as above."""
+    with mock.patch(
+        "core.tasks.documents.delete_service_documents.delay"
+    ) as mock_delay:
+        yield mock_delay
 
 
 @pytest.fixture
@@ -16,3 +100,142 @@ def mock_user_teams():
         "core.models.User.teams", new_callable=mock.PropertyMock
     ) as mock_teams:
         yield mock_teams
+
+
+@pytest.fixture(name="yhub_content")
+def yhub_content_fixture():
+    """
+    Serve the content of every document, as the collaboration server does.
+
+    It owns the content: a document built by the factories has none in the
+    database, and what it holds is whatever this fake answers for it. The mock
+    is yielded, so a test can serve another document (`return_value`), none at
+    all (`return_value = None`) or a different one per document
+    (`side_effect`).
+    """
+    with mock.patch.object(
+        YHubService, "get_ydoc", return_value=factories.YDOC_HELLO_WORLD_UPDATE
+    ) as mock_get_ydoc:
+        yield mock_get_ydoc
+
+
+@pytest.fixture(name="indexer_settings")
+def indexer_settings_fixture(settings):
+    """
+    Setup valid settings for the document indexer. Clear the indexer cache.
+
+    The indexer reads the content of a document from the collaboration server,
+    which is faked here: it holds the same content for every document, and a
+    test wanting one without content answers `None` for it (see the
+    `yhub_content` fixture, this is the same fake).
+    """
+
+    # pylint: disable-next=import-outside-toplevel
+    from core.services.search_indexers import (  # noqa: PLC0415
+        get_document_indexer,
+    )
+
+    get_document_indexer.cache_clear()
+
+    settings.SEARCH_INDEXER_CLASS = "core.services.search_indexers.FindDocumentIndexer"
+    settings.SEARCH_INDEXER_SECRET = "ThisIsAKeyForTest"
+    settings.INDEXING_URL = "http://localhost:8081/api/v1.0/documents/index/"
+    settings.SEARCH_URL = "http://localhost:8081/api/v1.0/documents/search/"
+    settings.SEARCH_INDEXER_COUNTDOWN = 1
+
+    with mock.patch.object(
+        YHubService, "get_ydoc", return_value=factories.YDOC_HELLO_WORLD_UPDATE
+    ):
+        yield settings
+
+    # clear cache to prevent issues with other tests
+    get_document_indexer.cache_clear()
+
+
+def resource_server_backend_setup(settings):
+    """
+    A fixture to create a user token for testing.
+    """
+    assert (
+        settings.OIDC_RS_BACKEND_CLASS
+        == "lasuite.oidc_resource_server.backend.ResourceServerBackend"
+    )
+
+    settings.OIDC_RESOURCE_SERVER_ENABLED = True
+    settings.OIDC_RS_CLIENT_ID = "some_client_id"
+    settings.OIDC_RS_CLIENT_SECRET = "some_client_secret"
+
+    settings.OIDC_OP_URL = "https://oidc.example.com"
+    settings.OIDC_VERIFY_SSL = False
+    settings.OIDC_TIMEOUT = 5
+    settings.OIDC_PROXY = None
+    settings.OIDC_OP_JWKS_ENDPOINT = "https://oidc.example.com/jwks"
+    settings.OIDC_OP_INTROSPECTION_ENDPOINT = "https://oidc.example.com/introspect"
+    settings.OIDC_RS_SCOPES = ["openid", "groups"]
+    settings.OIDC_RS_ALLOWED_AUDIENCES = ["some_service_provider"]
+
+
+@pytest.fixture
+def resource_server_backend_conf(settings):
+    """
+    A fixture to create a user token for testing.
+    """
+    resource_server_backend_setup(settings)
+    reload_urls()
+
+
+@pytest.fixture
+def resource_server_backend(settings):
+    """
+    A fixture to create a user token for testing.
+    Including a mocked introspection endpoint.
+    """
+    resource_server_backend_setup(settings)
+    reload_urls()
+
+    with responses.RequestsMock() as rsps:
+        rsps.add(
+            responses.POST,
+            "https://oidc.example.com/introspect",
+            json={
+                "iss": "https://oidc.example.com",
+                "aud": "some_client_id",  # settings.OIDC_RS_CLIENT_ID
+                "sub": "very-specific-sub",
+                "client_id": "some_service_provider",
+                "scope": "openid groups",
+                "active": True,
+            },
+        )
+
+        yield rsps
+
+
+@pytest.fixture
+def user_specific_sub():
+    """
+    A fixture to create a user token for testing.
+    """
+    user = factories.UserFactory(sub="very-specific-sub", full_name="External User")
+
+    yield user
+
+
+def build_authorization_bearer(token):
+    """
+    Build an Authorization Bearer header value from a token.
+
+    This can be used like this:
+    client.post(
+        ...
+        HTTP_AUTHORIZATION=f"Bearer {build_authorization_bearer('some_token')}",
+    )
+    """
+    return base64.b64encode(token.encode("utf-8")).decode("utf-8")
+
+
+@pytest.fixture
+def user_token():
+    """
+    A fixture to create a user token for testing.
+    """
+    return build_authorization_bearer("some_token")

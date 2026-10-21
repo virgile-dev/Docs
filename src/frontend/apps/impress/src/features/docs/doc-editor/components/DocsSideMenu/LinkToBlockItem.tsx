@@ -1,0 +1,68 @@
+import { SideMenuExtension } from '@blocknote/core/extensions';
+import {
+  useBlockNoteEditor,
+  useComponentsContext,
+  useExtensionState,
+} from '@blocknote/react';
+import { useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+
+import { Box } from '@/components';
+import { useClipboard } from '@/hooks';
+import LinkIcon from '@/icons/link.svg';
+import { useResponsiveStore } from '@/stores/useResponsiveStore';
+
+import type { DocsBlockNoteEditor } from '../../types';
+
+export const LinkToBlockItem = () => {
+  const { t } = useTranslation();
+  const { isMobile } = useResponsiveStore();
+  const Components = useComponentsContext();
+  const editor: DocsBlockNoteEditor = useBlockNoteEditor();
+  const copyToClipboard = useClipboard();
+  const block = useExtensionState(SideMenuExtension, {
+    editor,
+    selector: (state) => state?.block,
+  });
+
+  const copyLinkToBlock = useCallback(() => {
+    if (!block?.id) {
+      return;
+    }
+
+    copyToClipboard(
+      `${window.location.origin}${window.location.pathname}#${block.id}`,
+      t('Link Copied !', {
+        description: 'Toast confirming a link was copied to the clipboard',
+      }),
+      t('Failed to copy link', {
+        description: 'Toast shown when copying a link failed',
+      }),
+    );
+
+    if (!isMobile) {
+      editor.focus();
+    }
+
+    editor.setTextCursorPosition(block.id, 'end');
+  }, [block?.id, copyToClipboard, editor, isMobile, t]);
+
+  if (Components === undefined || block === undefined) {
+    return null;
+  }
+
+  return (
+    <Components.Generic.Menu.Item
+      className="bn-menu-item"
+      onClick={copyLinkToBlock}
+    >
+      <Box $align="center" $gap="xxs" $direction="row">
+        <LinkIcon width="16" height="16" aria-hidden="true" />
+        {t('Copy link to block', {
+          description:
+            'Editor side menu action copying a link to the current block',
+        })}
+      </Box>
+    </Components.Generic.Menu.Item>
+  );
+};

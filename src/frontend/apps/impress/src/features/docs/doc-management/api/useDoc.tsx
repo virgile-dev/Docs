@@ -19,14 +19,13 @@ export const getDoc = async ({ id }: DocParams): Promise<Doc> => {
 };
 
 export const KEY_DOC = 'doc';
-export const KEY_DOC_VISIBILITY = 'doc-visibility';
 
 export function useDoc(
   param: DocParams,
   queryConfig?: UseQueryOptions<Doc, APIError, Doc>,
 ) {
   return useQuery<Doc, APIError, Doc>({
-    queryKey: [KEY_DOC, param],
+    queryKey: queryConfig?.queryKey ?? [KEY_DOC, param],
     queryFn: () => getDoc(param),
     ...queryConfig,
   });

@@ -1,16 +1,29 @@
-import { Button, Modal, ModalSize, useModal } from '@openfun/cunningham-react';
+import {
+  Button,
+  Modal,
+  ModalSize,
+  useModal,
+} from '@gouvfr-lasuite/ui-components';
+import dynamic from 'next/dynamic';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createGlobalStyle, css } from 'styled-components';
 
-import { Box, Icon, Text } from '@/components';
-import { DocEditor } from '@/features/docs/doc-editor';
-import { Doc } from '@/features/docs/doc-management';
+import { Box, ButtonCloseModal, Text } from '@/components';
+import { Doc } from '@/docs/doc-management';
 
-import { Versions } from '../types';
+import { DocVersion } from '../types';
 
-import { ModalConfirmationVersion } from './ModalConfirmationVersion';
+import { DocVersionEditor } from './DocVersionEditor';
 import { VersionList } from './VersionList';
+
+const ModalConfirmationVersion = dynamic(
+  () =>
+    import('./ModalConfirmationVersion').then((mod) => ({
+      default: mod.ModalConfirmationVersion,
+    })),
+  { ssr: false },
+);
 
 const NoPaddingStyle = createGlobalStyle`
   .c__modal__scroller:has(.noPadding) {
@@ -35,9 +48,10 @@ export const ModalSelectVersion = ({
 }: ModalSelectVersionProps) => {
   const { t } = useTranslation();
   const [selectedVersionId, setSelectedVersionId] =
-    useState<Versions['version_id']>();
-
+    useState<DocVersion['id']>();
+  const canRestore = doc.abilities.partial_update;
   const restoreModal = useModal();
+
   return (
     <>
       <Modal
@@ -46,16 +60,28 @@ export const ModalSelectVersion = ({
         closeOnClickOutside={true}
         size={ModalSize.EXTRA_LARGE}
         onClose={onClose}
+        aria-label={t('Version history', {
+          description: 'Title of the dialog listing past versions',
+        })}
       >
         <NoPaddingStyle />
         <Box
-          aria-label="version history modal"
-          className="noPadding"
+          className="--docs--modal-select-version noPadding"
           $direction="row"
           $height="100%"
           $maxHeight="calc(100vh - 2em - 12px)"
           $overflow="hidden"
         >
+          <Text
+            as="h1"
+            $margin="0"
+            id="modal-select-version-title"
+            className="sr-only"
+          >
+            {t('Version history', {
+              description: 'Title of the dialog listing past versions',
+            })}
+          </Text>
           <Box
             $css={css`
               display: flex;
@@ -71,12 +97,17 @@ export const ModalSelectVersion = ({
               $align="center"
             >
               {selectedVersionId && (
-                <DocEditor doc={doc} versionId={selectedVersionId} />
+                <DocVersionEditor
+                  docId={doc.id}
+                  versionId={selectedVersionId}
+                />
               )}
               {!selectedVersionId && (
                 <Box $align="center" $justify="center" $height="100%">
                   <Text $size="h6" $weight="bold">
-                    {t('Select a version on the right to restore')}
+                    {t('Select a version on the right to restore', {
+                      description: 'Hint in the version history dialog',
+                    })}
                   </Text>
                 </Box>
               )}
@@ -89,11 +120,14 @@ export const ModalSelectVersion = ({
             $height="calc(100vh - 2em - 12px)"
             $css={css`
               overflow-y: hidden;
-              border-left: 1px solid var(--c--theme--colors--greyscale-200);
+              border-left: 1px solid
+                var(--c--contextuals--border--surface--primary);
             `}
           >
             <Box
-              aria-label="version list"
+              aria-label={t('Version list', {
+                description: 'Accessible name of the list of versions',
+              })}
               $css={css`
                 overflow-y: auto;
                 flex: 1;
@@ -106,18 +140,24 @@ export const ModalSelectVersion = ({
                 $align="center"
                 $css={css`
                   border-bottom: 1px solid
-                    var(--c--theme--colors--greyscale-200);
+                    var(--c--contextuals--border--surface--primary);
                 `}
                 $padding="sm"
               >
-                <Text $size="h6" $variation="1000" $weight="bold">
-                  {t('History')}
+                <Text $size="h6" $weight="bold">
+                  {t('History', {
+                    description:
+                      'Dropdown menu item to view the document history',
+                  })}
                 </Text>
-                <Button
+                <ButtonCloseModal
+                  aria-label={t('Close the version history modal', {
+                    description:
+                      'Accessible name of the button closing the version history',
+                  })}
+                  autoFocus
                   onClick={onClose}
                   size="nano"
-                  color="primary-text"
-                  icon={<Icon iconName="close" />}
                 />
               </Box>
 
@@ -127,27 +167,35 @@ export const ModalSelectVersion = ({
                 selectedVersionId={selectedVersionId}
               />
             </Box>
-            <Box
-              $padding="xs"
-              $css={css`
-                border-top: 1px solid var(--c--theme--colors--greyscale-200);
-              `}
-            >
-              <Button
-                fullWidth
-                disabled={!selectedVersionId}
-                onClick={restoreModal.open}
-                color="primary"
+            {canRestore && (
+              <Box
+                $padding="xs"
+                $css={css`
+                  border-top: 1px solid
+                    var(--c--contextuals--border--surface--primary);
+                `}
               >
-                {t('Restore')}
-              </Button>
-            </Box>
+                <Button
+                  fullWidth
+                  disabled={!selectedVersionId}
+                  onClick={restoreModal.open}
+                >
+                  {t('Restore', {
+                    description:
+                      'Button to restore a deleted document or an older version',
+                  })}
+                </Button>
+              </Box>
+            )}
           </Box>
         </Box>
       </Modal>
       {restoreModal.isOpen && selectedVersionId && (
         <ModalConfirmationVersion
           onClose={() => {
+            restoreModal.close();
+          }}
+          onSuccess={() => {
             restoreModal.close();
             onClose();
             setSelectedVersionId(undefined);

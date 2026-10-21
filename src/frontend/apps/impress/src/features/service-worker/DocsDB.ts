@@ -1,10 +1,9 @@
 import { DBSchema, IDBPDatabase, deleteDB, openDB } from 'idb';
 
-import { Doc, DocsResponse } from '@/features/docs';
+import { Doc, DocsResponse } from '@/docs/doc-management';
 
 import { RequestData, RequestSerializer } from './RequestSerializer';
 
-// eslint-disable-next-line import/order
 import pkg from '@/../package.json';
 
 export type DBRequest = {
@@ -21,6 +20,10 @@ interface IDocsDB extends DBSchema {
     key: string;
     value: Doc;
   };
+  'doc-tree': {
+    key: string;
+    value: Doc;
+  };
   'doc-mutation': {
     key: string;
     value: DBRequest;
@@ -31,15 +34,24 @@ interface IDocsDB extends DBSchema {
   };
 }
 
-type TableName = 'doc-list' | 'doc-item' | 'doc-mutation';
+type TableName = 'doc-list' | 'doc-item' | 'doc-tree' | 'doc-mutation';
 
 /**
- * IndexDB version must be a integer
- * @returns
+ * IndexDB prefers incremental versioning when upgrading the database,
+ * otherwise it may throw an error, and we need to destroy the database
+ * and recreate it.
+ * To calculate the version number, we use the following formula,
+ * assuring incremental versioning:
+ *   version = major * 1000000 + minor * 1000 + patch
+ * ex:
+ *  - version 1.2.3 => 1002003
+ *  - version 0.10.15 => 10015
+ *  - version 2.0.0 => 2000000
+ * @returns number
  */
-const getCurrentVersion = () => {
-  const [major, minor, patch] = pkg.version.split('.');
-  return parseFloat(`${major}${minor}${patch}`);
+export const getCurrentVersion = () => {
+  const [major, minor, patch] = pkg.version.split('.').map(Number);
+  return major * 1000000 + minor * 1000 + patch;
 };
 
 /**
@@ -64,11 +76,24 @@ export class DocsDB {
           if (!db.objectStoreNames.contains('doc-item')) {
             db.createObjectStore('doc-item');
           }
+          if (!db.objectStoreNames.contains('doc-tree')) {
+            db.createObjectStore('doc-tree');
+          }
           if (!db.objectStoreNames.contains('doc-mutation')) {
             db.createObjectStore('doc-mutation');
           }
           if (!db.objectStoreNames.contains('doc-version')) {
             db.createObjectStore('doc-version');
+          }
+          /**
+           * Dropped with the Django `documents/{id}/content/` endpoint it
+           * mirrored: document content is the collaboration server's alone now.
+           * Existing browsers still carry the store, so it is removed here
+           * rather than left orphaned. Cast because it is deliberately absent
+           * from the schema above.
+           */
+          if (db.objectStoreNames.contains('doc-content' as never)) {
+            db.deleteObjectStore('doc-content' as never);
           }
         },
       });
@@ -107,6 +132,7 @@ export class DocsDB {
 
       await DocsDB.deleteAll('doc-item');
       await DocsDB.deleteAll('doc-list');
+      await DocsDB.deleteAll('doc-tree');
       await DocsDB.deleteAll('doc-mutation');
       await db.put('doc-version', currentVersion, 'version');
     }
@@ -121,18 +147,33 @@ export class DocsDB {
     key: string,
     body: DocsResponse | Doc | DBRequest,
     tableName: TableName,
+    isRetry = false,
   ): Promise<void> {
     const db = await DocsDB.open();
 
     try {
       await db.put(tableName, body, key);
     } catch (error) {
-      console.error(
-        'SW: Failed to save response in IndexedDB',
-        error,
-        key,
-        body,
-      );
+      db.close();
+      // If the store is missing and we haven't retried yet, reset the DB once
+      // (handles a PR that added a store without a version bump).
+      // The isRetry guard prevents an infinite loop if the store name is invalid.
+      if (!isRetry && !db.objectStoreNames.contains(tableName)) {
+        console.warn(
+          'SW: Missing object store, resetting IndexedDB and retrying',
+          tableName,
+        );
+        await deleteDB(DocsDB.DBNAME);
+        await DocsDB.cacheResponse(key, body, tableName, true);
+      } else {
+        console.error(
+          'SW: Failed to save response in IndexedDB',
+          error,
+          key,
+          body,
+        );
+      }
+      return;
     }
 
     db.close();

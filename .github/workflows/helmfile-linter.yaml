@@ -7,24 +7,31 @@ on:
     branches:
       - 'main'
 
+# One run per pull request: a new push cancels the checks of the previous one.
+# Pushes get a group of their own (the commit), so every commit of main keeps
+# its full set of checks.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   helmfile-lint:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/helmfile/helmfile:latest
+      image: ghcr.io/helmfile/helmfile:v0.171.0
     steps:
     -
       name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
     -
       name: Helmfile lint
       shell: bash
       run: |
         set -e
-        HELMFILE=src/helm/helmfile.yaml
-        environments=$(awk '/environments:/ {flag=1; next} flag && NF {print} !NF {flag=0}' "$HELMFILE" | grep -E '^[[:space:]]{2}[a-zA-Z]+' | sed 's/^[[:space:]]*//;s/:.*//')
+        HELMFILE=src/helm/helmfile.yaml.gotmpl
+        environments=$(awk 'BEGIN {in_env=0} /^environments:/ {in_env=1; next} /^---/ {in_env=0} in_env && /^  [^ ]/ {gsub(/^  /,""); gsub(/:.*$/,""); print}' "$HELMFILE")
         for env in $environments; do
           echo "################### $env lint ###################"
-          helmfile -e $env -f $HELMFILE lint || exit 1
+          helmfile -e $env lint -f $HELMFILE || exit 1
           echo -e "\n"
         done

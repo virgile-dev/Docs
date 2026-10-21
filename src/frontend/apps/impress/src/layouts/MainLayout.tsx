@@ -1,63 +1,119 @@
 import { PropsWithChildren } from 'react';
+import { useTranslation } from 'react-i18next';
 import { css } from 'styled-components';
 
-import { Box } from '@/components';
-import { useCunninghamTheme } from '@/cunningham';
-import { Footer } from '@/features/footer';
-import { Header } from '@/features/header';
-import { HEADER_HEIGHT } from '@/features/header/conf';
-import { LeftPanel } from '@/features/left-panel';
-import { MAIN_LAYOUT_ID } from '@/layouts/conf';
-import { useResponsiveStore } from '@/stores';
+import { Box, BoxType } from '@/components';
+import { LeftPanel, ResizableLeftPanel } from '@/features/left-panel';
+import { RightPanel } from '@/features/right-panel/components/RightPanel';
+import { DocEditorSkeleton, Skeleton } from '@/features/skeletons';
+
+import { MAIN_LAYOUT_ID } from './conf';
+import { usePanelCoordination } from './usePanelCoordination';
 
 type MainLayoutProps = {
-  backgroundColor?: 'white' | 'grey';
-  withoutFooter?: boolean;
+  enableResizablePanel?: boolean;
+  propsLayout?: BoxType;
+  propsContent?: BoxType;
 };
 
 export function MainLayout({
   children,
-  backgroundColor = 'white',
-  withoutFooter = false,
+  enableResizablePanel = false,
+  propsLayout,
+  propsContent,
 }: PropsWithChildren<MainLayoutProps>) {
-  const { isDesktop } = useResponsiveStore();
-  const { colorsTokens } = useCunninghamTheme();
-
-  const colors = colorsTokens();
-
   return (
-    <div>
-      <Header />
-      <Box
-        $direction="row"
-        $margin={{ top: `${HEADER_HEIGHT}px` }}
-        $width="100%"
+    <Box
+      className="--docs--main-layout"
+      $direction="row"
+      $width="100%"
+      $height="100dvh"
+      {...propsLayout}
+    >
+      <MainLayoutContent
+        enableResizablePanel={enableResizablePanel}
+        {...propsContent}
       >
-        <LeftPanel />
-        <Box
-          as="main"
-          id={MAIN_LAYOUT_ID}
-          $align="center"
-          $flex={1}
-          $width="100%"
-          $height={`calc(100dvh - ${HEADER_HEIGHT}px)`}
-          $padding={{
-            all: isDesktop ? 'base' : '2xs',
-          }}
-          $background={
-            backgroundColor === 'white'
-              ? colors['greyscale-000']
-              : colors['greyscale-050']
-          }
-          $css={css`
-            overflow-y: auto;
-            overflow-x: clip;
-          `}
-        >
-          {children}
-        </Box>
-      </Box>
-      {!withoutFooter && <Footer />}
-    </div>
+        {children}
+      </MainLayoutContent>
+    </Box>
   );
 }
+
+export interface MainLayoutContentProps extends BoxType {
+  enableResizablePanel: boolean;
+}
+
+export function MainLayoutContent({
+  children,
+  enableResizablePanel,
+  ...props
+}: PropsWithChildren<MainLayoutContentProps>) {
+  if (enableResizablePanel) {
+    return <MainResizableLayout {...props}>{children}</MainResizableLayout>;
+  }
+
+  return (
+    <>
+      <LeftPanel />
+      <MainContent {...props}>{children}</MainContent>
+      <RightPanel />
+    </>
+  );
+}
+
+const MainResizableLayout = ({
+  children,
+  ...props
+}: PropsWithChildren<BoxType>) => {
+  usePanelCoordination();
+
+  return (
+    <ResizableLeftPanel>
+      <Box $direction="row" $width="100%" $position="relative">
+        <MainContent $flex="auto" $padding="0" {...props}>
+          {children}
+        </MainContent>
+        <RightPanel />
+      </Box>
+    </ResizableLeftPanel>
+  );
+};
+
+export const MainContent = ({
+  children,
+  ...props
+}: PropsWithChildren<BoxType>) => {
+  const { t } = useTranslation();
+
+  return (
+    <Box
+      as="main"
+      role="main"
+      aria-label={t('Main content', {
+        description: 'Accessible name of the main area of the page',
+      })}
+      id={MAIN_LAYOUT_ID}
+      $align="center"
+      $flex={1}
+      $width="100%"
+      $height="100dvh"
+      $position="relative"
+      $background="var(--c--contextuals--background--surface--primary)"
+      $css={css`
+        overflow-y: auto;
+        overflow-x: clip;
+
+        &:focus-visible {
+          outline: none;
+        }
+      `}
+      {...props}
+    >
+      <Skeleton>
+        <DocEditorSkeleton />
+      </Skeleton>
+      {children}
+    </Box>
+  );
+};

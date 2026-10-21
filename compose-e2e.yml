@@ -1,0 +1,59 @@
+services:
+  frontend:
+    user: "${DOCKER_USER:-1000}"
+    build:
+      context: .
+      dockerfile: ./src/frontend/Dockerfile
+      target: frontend-production
+      args:
+        API_ORIGIN: "http://localhost:8071"
+        PUBLISH_AS_MIT: "false"
+        SW_DEACTIVATED: "true"
+    image: impress:frontend-production
+    ports:
+      - "3000:3000"
+
+  y-provider-converter:
+    user: ${DOCKER_USER:-1000}
+    build:
+      context: .
+      dockerfile: ./src/frontend/servers/y-provider/Dockerfile
+      target: y-provider
+    image: impress:y-provider-production
+    restart: unless-stopped
+    env_file:
+      - env.d/development/common
+      - env.d/development/common.local
+
+  yhub-e2e:
+    user: ${DOCKER_USER:-1000}
+    networks:
+      default:
+        aliases:
+          - yhub
+    build:
+      context: .
+      dockerfile: ./src/yhub-server/Dockerfile
+      target: yhub
+    image: impress:yhub-e2e
+    environment:
+      HOME: /tmp
+    env_file:
+      - env.d/development/yhub-postgres
+      - env.d/development/yhub-postgres.local
+      - env.d/development/yhub
+      - env.d/development/yhub.local
+    restart: unless-stopped
+    volumes:
+      - ./data/jwt:/data/jwt:ro
+    ports:
+      - "3002:3002"
+    depends_on:
+      yhub-valkey:
+        condition: service_healthy
+      yhub-postgres:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy

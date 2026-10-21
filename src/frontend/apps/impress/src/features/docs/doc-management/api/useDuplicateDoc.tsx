@@ -1,0 +1,107 @@
+import { VariantType } from '@gouvfr-lasuite/ui-components';
+import {
+  type InfiniteData,
+  type UseMutationOptions,
+  useMutation,
+  useQueryClient,
+} from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
+
+import { APIError, errorCauses, fetchAPI } from '@/api';
+import { useToast } from '@/hooks';
+
+import { Doc } from '../types';
+
+import { DocsParams, DocsResponse, KEY_LIST_DOC } from './useDocs';
+
+interface DuplicateDocPayload {
+  docId: string;
+  with_accesses?: boolean;
+  with_descendants?: boolean;
+}
+
+type DuplicateDocResponse = Doc;
+
+export const duplicateDoc = async ({
+  docId,
+  with_accesses = false,
+  with_descendants = true,
+}: DuplicateDocPayload): Promise<DuplicateDocResponse> => {
+  const response = await fetchAPI(`documents/${docId}/duplicate/`, {
+    method: 'POST',
+    body: JSON.stringify({ with_accesses, with_descendants }),
+  });
+
+  if (!response.ok) {
+    throw new APIError(
+      'Failed to duplicate the doc',
+      await errorCauses(response),
+    );
+  }
+
+  return response.json() as Promise<DuplicateDocResponse>;
+};
+
+type DuplicateDocParams = DuplicateDocPayload & {
+  canSave: boolean;
+};
+
+type DuplicateDocOptions = UseMutationOptions<
+  DuplicateDocResponse,
+  APIError,
+  DuplicateDocParams
+>;
+
+export function useDuplicateDoc(options?: DuplicateDocOptions) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const { t } = useTranslation();
+
+  return useMutation<DuplicateDocResponse, APIError, DuplicateDocParams>({
+    mutationFn: duplicateDoc,
+    onSuccess: (data, variables, onMutateResult, context) => {
+      // Add the duplicated document to the list of documents in the cache
+      // It avoids the need to refetch the list of documents after duplicating a document
+      queryClient.setQueriesData<InfiniteData<DocsResponse>>(
+        {
+          queryKey: [KEY_LIST_DOC],
+          predicate: (query) => {
+            const params = query.queryKey[1] as DocsParams | undefined;
+            return params?.is_creator_me !== false;
+          },
+        },
+        (oldData) => {
+          if (!oldData) {
+            return oldData;
+          }
+
+          const [firstPage, ...restPages] = oldData.pages;
+
+          return {
+            ...oldData,
+            pages: [
+              {
+                ...firstPage,
+                count: firstPage.count + 1,
+                results: [data, ...firstPage.results],
+              },
+              ...restPages,
+            ],
+          };
+        },
+      );
+
+      void options?.onSuccess?.(data, variables, onMutateResult, context);
+    },
+    onError: (error, variables, onMutateResult, context) => {
+      const message = t('Failed to duplicate the document...', {
+        description: 'Toast shown when duplicating a document failed',
+      });
+      toast(message, VariantType.ERROR, {
+        duration: 3000,
+      });
+
+      void options?.onError?.(error, variables, onMutateResult, context);
+    },
+  });
+}

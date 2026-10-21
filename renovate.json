@@ -1,7 +1,11 @@
 {
-  "extends": ["github>numerique-gouv/renovate-configuration"],
+  "extends": ["github>suitenumerique/ci//renovate/default"],
   "dependencyDashboard": true,
-  "labels": ["dependencies", "noChangeLog"],
+  "labels": ["dependencies", "noChangeLog", "automated"],
+  "schedule": ["* 20-23 * * 0"],
+  "prCreation": "not-pending",
+  "rebaseWhen": "conflicted",
+  "updateNotScheduled": false,
   "packageRules": [
     {
       "enabled": false,
@@ -10,16 +14,70 @@
       "matchPackageNames": []
     },
     {
+      "groupName": "allowed redis versions",
+      "matchManagers": ["pep621"],
+      "matchPackageNames": ["redis"],
+      "allowedVersions": "<6.0.0"
+    },
+    {
+      "groupName": "allowed django versions",
+      "matchManagers": ["pep621"],
+      "matchPackageNames": ["django"],
+      "allowedVersions": "<6.0.0"
+    },
+    {
+      "groupName": "allowed langfuse versions",
+      "matchManagers": ["pep621"],
+      "matchPackageNames": ["langfuse"],
+      "allowedVersions": "<3.12.0"
+    },
+    {
+      "groupName": "allowed django-treebeard versions",
+      "matchManagers": ["pep621"],
+      "matchPackageNames": ["django-treebeard"],
+      "allowedVersions": "<5.0.0"
+    },
+    {
+      "groupName": "allowed @ai-sdk/openai versions",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@ai-sdk/openai"],
+      "allowedVersions": "<4.0.0"
+    },
+    {
+      "groupName": "allowed ai versions",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["ai"],
+      "allowedVersions": "<7.0.0"
+    },
+    {
+      "groupName": "allowed typescript versions",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "<7.0.0"
+    },
+    {
+      "description": "yhub-server pins @y/y while @y/hub depends on it by range: bumped apart, they install two copies of Yjs, which breaks its constructor checks",
+      "groupName": "@y packages",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@y/*"]
+    },
+    {
       "enabled": false,
       "groupName": "ignored js dependencies",
       "matchManagers": ["npm"],
       "matchPackageNames": [
-        "fetch-mock",
         "node",
         "node-fetch",
-        "eslint",
+        "react-resizable-panels",
+        "stylelint",
+        "stylelint-config-standard",
         "workbox-webpack-plugin"
       ]
+    },
+    {
+      "description": "Schedule dependency updates on Sunday evening (UTC). Placed last on purpose: a matching packageRule's schedule replaces the preset's per-group 'before 7am on monday' schedule, and the top-level schedule alone would be ignored for these groups.",
+      "matchManagers": ["github-actions", "npm", "setup-cfg", "pep621"],
+      "schedule": ["* 20-23 * * 0"]
     }
   ]
 }

@@ -2,86 +2,29 @@ import path from 'path';
 
 import { expect, test } from '@playwright/test';
 
-import { createDoc, verifyDocName } from './common';
-
-const config = {
-  CRISP_WEBSITE_ID: null,
-  COLLABORATION_WS_URL: 'ws://localhost:8083/collaboration/ws/',
-  ENVIRONMENT: 'development',
-  FRONTEND_THEME: 'dsfr',
-  MEDIA_BASE_URL: 'http://localhost:8083',
-  LANGUAGES: [
-    ['en-us', 'English'],
-    ['fr-fr', 'French'],
-    ['de-de', 'German'],
-  ],
-  LANGUAGE_CODE: 'en-us',
-  SENTRY_DSN: null,
-};
+import { CONFIG, createDoc, overrideConfig } from './utils-common';
+import { openSuggestionMenu, writeInEditor } from './utils-editor';
 
 test.describe('Config', () => {
-  test('it checks the config api is called', async ({ page }) => {
-    const responsePromise = page.waitForResponse(
-      (response) =>
-        response.url().includes('/config/') && response.status() === 200,
-    );
+  if (process.env.IS_INSTANCE !== 'true') {
+    test('it checks that sentry is trying to init from config endpoint', async ({
+      page,
+    }) => {
+      await overrideConfig(page, {
+        SENTRY_DSN: 'https://sentry.io/123',
+      });
 
-    await page.goto('/');
+      const invalidMsg = 'Invalid Sentry Dsn: https://sentry.io/123';
+      const consoleMessage = page.waitForEvent('console', {
+        timeout: 5000,
+        predicate: (msg) => msg.text().includes(invalidMsg),
+      });
 
-    const response = await responsePromise;
-    expect(response.ok()).toBeTruthy();
+      await page.goto('/');
 
-    expect(await response.json()).toStrictEqual(config);
-  });
-
-  test('it checks that sentry is trying to init from config endpoint', async ({
-    page,
-  }) => {
-    await page.route('**/api/v1.0/config/', async (route) => {
-      const request = route.request();
-      if (request.method().includes('GET')) {
-        await route.fulfill({
-          json: {
-            ...config,
-            SENTRY_DSN: 'https://sentry.io/123',
-          },
-        });
-      } else {
-        await route.continue();
-      }
+      expect((await consoleMessage).text()).toContain(invalidMsg);
     });
-
-    const invalidMsg = 'Invalid Sentry Dsn: https://sentry.io/123';
-    const consoleMessage = page.waitForEvent('console', {
-      timeout: 5000,
-      predicate: (msg) => msg.text().includes(invalidMsg),
-    });
-
-    await page.goto('/');
-
-    expect((await consoleMessage).text()).toContain(invalidMsg);
-  });
-
-  test('it checks that theme is configured from config endpoint', async ({
-    page,
-  }) => {
-    const responsePromise = page.waitForResponse(
-      (response) =>
-        response.url().includes('/config/') && response.status() === 200,
-    );
-
-    await page.goto('/');
-
-    const response = await responsePromise;
-    expect(response.ok()).toBeTruthy();
-
-    const jsonResponse = await response.json();
-    expect(jsonResponse.FRONTEND_THEME).toStrictEqual('dsfr');
-
-    const footer = page.locator('footer').first();
-    // alt 'Gouvernement Logo' comes from the theme
-    await expect(footer.getByAltText('Gouvernement Logo')).toBeVisible();
-  });
+  }
 
   test('it checks that media server is configured from config endpoint', async ({
     page,
@@ -93,9 +36,16 @@ test.describe('Config', () => {
 
     const fileChooserPromise = page.waitForEvent('filechooser');
 
-    await page.locator('.bn-block-outer').last().fill('Anything');
-    await page.locator('.bn-block-outer').last().fill('/');
-    await page.getByText('Resizable image with caption').click();
+    await writeInEditor({
+      page,
+      text: 'Anything',
+    });
+
+    await openSuggestionMenu({
+      page,
+      suggestion: 'Resizable image with caption',
+    });
+
     await page.getByText('Upload image').click();
 
     const fileChooser = await fileChooserPromise;
@@ -103,60 +53,110 @@ test.describe('Config', () => {
       path.join(__dirname, 'assets/logo-suite-numerique.png'),
     );
 
-    const image = page.getByRole('img', { name: 'logo-suite-numerique.png' });
+    const image = page
+      .locator('.--docs--editor-container img.bn-visual-media')
+      .first();
 
     await expect(image).toBeVisible();
 
+    // Wait for the media-check to be processed
+
+    await page.waitForTimeout(1000);
+
     // Check src of image
     expect(await image.getAttribute('src')).toMatch(
-      /http:\/\/localhost:8083\/media\/.*\/attachments\/.*.png/,
+      new RegExp(`${process.env.MEDIA_BASE_URL}/media/.*?/attachments/.*?.png`),
     );
   });
 
   test('it checks that collaboration server is configured from config endpoint', async ({
     page,
-    browserName,
   }) => {
-    const webSocketPromise = page.waitForEvent('websocket', (webSocket) => {
-      return webSocket.url().includes('ws://localhost:8083/collaboration/ws/');
-    });
-
     await page.goto('/');
 
-    const randomDoc = await createDoc(
-      page,
-      'doc-collaboration',
-      browserName,
-      1,
-    );
+    void page
+      .getByRole('link', {
+        name: 'New',
+        exact: true,
+      })
+      .click();
 
-    await verifyDocName(page, randomDoc[0]);
-
-    const webSocket = await webSocketPromise;
-    expect(webSocket.url()).toContain('ws://localhost:8083/collaboration/ws/');
+    const webSocket = await page.waitForEvent('websocket', (webSocket) => {
+      return webSocket.url().includes(`${process.env.COLLABORATION_WS_URL}/`);
+    });
+    expect(webSocket.url()).toContain(`${process.env.COLLABORATION_WS_URL}/`);
   });
 
-  test('it checks that Crisp is trying to init from config endpoint', async ({
-    page,
-  }) => {
-    await page.route('**/api/v1.0/config/', async (route) => {
-      const request = route.request();
-      if (request.method().includes('GET')) {
-        await route.fulfill({
-          json: {
-            ...config,
-            CRISP_WEBSITE_ID: '1234',
-          },
-        });
-      } else {
-        await route.continue();
-      }
+  test('it checks FRONTEND_CSS_URL config', async ({ page }) => {
+    await overrideConfig(page, {
+      FRONTEND_CSS_URL: 'http://localhost:123465/css/style.css',
     });
 
     await page.goto('/');
 
     await expect(
-      page.locator('#crisp-chatbox').getByText('Invalid website'),
-    ).toBeVisible();
+      page
+        .locator('head link[href="http://localhost:123465/css/style.css"]')
+        .first(),
+    ).toBeAttached();
+  });
+
+  test('it checks FRONTEND_JS_URL config', async ({ page }) => {
+    await overrideConfig(page, {
+      FRONTEND_JS_URL: 'http://localhost:123465/js/script.js',
+    });
+
+    await page.goto('/');
+
+    await expect(
+      page
+        .locator('script[src="http://localhost:123465/js/script.js"]')
+        .first(),
+    ).toBeAttached();
+  });
+
+  if (process.env.IS_INSTANCE !== 'true') {
+    test('it checks the config api is called', async ({ page }) => {
+      const responsePromise = page.waitForResponse(
+        (response) =>
+          response.url().includes('/config/') && response.status() === 200,
+      );
+
+      await page.goto('/');
+
+      const response = await responsePromise;
+      expect(response.ok()).toBeTruthy();
+
+      const json = (await response.json()) as typeof CONFIG;
+      expect(json).toStrictEqual(CONFIG);
+    });
+  }
+});
+
+test.describe('Config: Not logged', () => {
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test('it checks that theme is configured from config endpoint', async ({
+    page,
+  }) => {
+    await page.goto('/');
+
+    await expect(
+      page.getByText('Collaborative writing, Simplified.'),
+    ).toHaveCSS('font-family', /Roboto/i, {
+      timeout: 10000,
+    });
+
+    await overrideConfig(page, {
+      FRONTEND_THEME: 'dsfr',
+    });
+
+    await page.goto('/');
+
+    await expect(
+      page.getByText('Collaborative writing, Simplified.'),
+    ).toHaveCSS('font-family', /Marianne/i, {
+      timeout: 10000,
+    });
   });
 });

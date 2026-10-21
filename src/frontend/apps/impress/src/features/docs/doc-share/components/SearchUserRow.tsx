@@ -1,12 +1,12 @@
+import { css } from 'styled-components';
+
 import { Box, Text } from '@/components';
 import {
   QuickSearchItemContent,
   QuickSearchItemContentProps,
 } from '@/components/quick-search';
-import { User } from '@/core';
 import { useCunninghamTheme } from '@/cunningham';
-
-import { UserAvatar } from './UserAvatar';
+import { User, UserAvatar } from '@/features/auth';
 
 type Props = {
   user: User;
@@ -21,27 +21,43 @@ export const SearchUserRow = ({
   alwaysShowRight = false,
   isInvitation = false,
 }: Props) => {
-  const hasFullName = user.full_name != null && user.full_name !== '';
+  const hasFullName = !!user.full_name;
   const { spacingsTokens, colorsTokens } = useCunninghamTheme();
-  const spacings = spacingsTokens();
-  const colors = colorsTokens();
 
   return (
     <QuickSearchItemContent
       right={right}
       alwaysShowRight={alwaysShowRight}
       left={
-        <Box $direction="row" $align="center" $gap={spacings['xs']}>
+        <Box
+          $direction="row"
+          $align="center"
+          $gap={spacingsTokens['xs']}
+          className="--docs--search-user-row"
+        >
           <UserAvatar
-            user={user}
-            background={isInvitation ? colors['greyscale-400'] : undefined}
+            fullName={user.full_name || user.email}
+            background={isInvitation ? colorsTokens['gray-400'] : undefined}
           />
           <Box $direction="column">
-            <Text $size="sm" $weight="500" $variation="1000">
+            <Text
+              $size="sm"
+              $weight="500"
+              $css={css`
+                line-break: anywhere;
+              `}
+            >
               {hasFullName ? user.full_name : user.email}
             </Text>
             {hasFullName && (
-              <Text $size="xs" $margin={{ top: '-2px' }} $variation="600">
+              <Text
+                $size="xs"
+                $margin={{ top: '-2px' }}
+                $variation="secondary"
+                $css={css`
+                  line-break: anywhere;
+                `}
+              >
                 {user.email}
               </Text>
             )}
